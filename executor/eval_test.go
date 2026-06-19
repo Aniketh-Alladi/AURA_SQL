@@ -98,6 +98,36 @@ func TestEvalBooleanOperators(t *testing.T) {
 	}
 }
 
+// NEW TEST: Arithmetic operators (Phase 2)
+func TestEvalArithmeticOperators(t *testing.T) {
+	tests := []struct {
+		name  string
+		op    core.BinOp
+		left  int64
+		right int64
+		want  core.Value
+	}{
+		{name: "OpAdd", op: core.OpAdd, left: 5, right: 3, want: core.NewInt(8)},
+		{name: "OpSub", op: core.OpSub, left: 10, right: 4, want: core.NewInt(6)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := eval(&core.BinaryExpr{
+				Op:    tt.op,
+				Left:  &core.Literal{Value: core.NewInt(tt.left)},
+				Right: &core.Literal{Value: core.NewInt(tt.right)},
+			}, core.Row{}, core.Schema{})
+			if err != nil {
+				t.Fatalf("eval arithmetic operator returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("eval arithmetic operator = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestEvalUnknownColumnError(t *testing.T) {
 	schema := core.Schema{Columns: []core.Column{{Name: "id", Type: core.TypeInt}}}
 	row := core.Row{Values: []core.Value{core.NewInt(1)}}
@@ -111,9 +141,11 @@ func TestEvalUnknownColumnError(t *testing.T) {
 	}
 }
 
+// FIXED: Use an invalid operator that's truly unsupported
 func TestEvalUnsupportedOperatorError(t *testing.T) {
+	// Use an invalid operator value (999 is not defined in core.BinOp)
 	_, err := eval(&core.BinaryExpr{
-		Op:    core.OpAdd,
+		Op:    999, // Not a valid BinOp
 		Left:  &core.Literal{Value: core.NewInt(1)},
 		Right: &core.Literal{Value: core.NewInt(2)},
 	}, core.Row{}, core.Schema{})
