@@ -206,6 +206,21 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 	return 0, core.Row{}, false, nil
 }
 
-func (it *heapFileIterator) Close() error {
-	return nil // Nothing to close for Phase 1
+
+// Close gracefully shuts down the engine, flushing caches and releasing file locks.
+func (e *Engine) Close() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, meta := range e.catalog.tables {
+		meta.HeapFile.pool.FlushAll()
+		meta.HeapFile.Close()
+	}
+	return nil
 }
+
+// Close cleanly shuts down the iterator.
+func (it *heapFileIterator) Close() error {
+	return nil // We don't have any active file locks tied to the iterator itself right now
+}
+

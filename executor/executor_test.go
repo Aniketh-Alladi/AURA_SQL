@@ -5,15 +5,31 @@ import (
 
 	"aurasql/core"
 	"aurasql/executor"
-	"aurasql/memstore"
+	"aurasql/storage" // <-- The new power unit
 )
 
+// setupEngine creates a fresh disk-backed engine for every test
+func setupEngine(t *testing.T) core.StorageEngine {
+	t.Helper()
+	dir := t.TempDir()
+	
+	eng, err := storage.New(dir)
+	if err != nil {
+		t.Fatalf("failed to create storage engine: %v", err)
+	}
+
+	t.Cleanup(func() {
+		eng.Close()
+	})
+
+	return eng
+}
 // ============================================================
 // Phase 1 tests (should still pass with refactored code)
 // ============================================================
 
 func TestCreateTable(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, err := eng.Begin()
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +60,7 @@ func TestCreateTable(t *testing.T) {
 }
 
 func TestInsert(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -74,7 +90,7 @@ func TestInsert(t *testing.T) {
 }
 
 func TestSelectWithWhere(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -104,7 +120,7 @@ func TestSelectWithWhere(t *testing.T) {
 }
 
 func TestSelectWithProjection(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -140,7 +156,7 @@ func TestSelectWithProjection(t *testing.T) {
 // ============================================================
 
 func TestUpdate(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -166,7 +182,7 @@ func TestUpdate(t *testing.T) {
 		t.Errorf("expected 1 row affected, got %d", result.RowsAffected)
 	}
 
-	// Verify
+// Verify
 	selectStmt := &core.SelectStmt{
 		Projection: []core.Expr{&core.Star{}},
 		From:       "users",
@@ -176,18 +192,24 @@ func TestUpdate(t *testing.T) {
 	if len(selectResult.Rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(selectResult.Rows))
 	}
-	// Check row 1 was updated
-	if selectResult.Rows[0].Values[1].Str != "updated" {
-		t.Errorf("expected 'updated', got %v", selectResult.Rows[0].Values[1])
-	}
-	// Check row 2 unchanged
-	if selectResult.Rows[1].Values[1].Str != "bob" {
-		t.Errorf("expected 'bob', got %v", selectResult.Rows[1].Values[1])
+	
+	// Because of Gear-2 updates, the physical order might change. 
+	// We must check values by their ID, not their array index!
+	for _, row := range selectResult.Rows {
+		id := row.Values[0].Int
+		name := row.Values[1].Str
+		
+		if id == 1 && name != "updated" {
+			t.Errorf("expected id 1 to be 'updated', got %v", name)
+		}
+		if id == 2 && name != "bob" {
+			t.Errorf("expected id 2 to be 'bob', got %v", name)
+		}
 	}
 }
 
 func TestUpdateAllRows(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -228,7 +250,7 @@ func TestUpdateAllRows(t *testing.T) {
 // ============================================================
 
 func TestDelete(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -264,7 +286,7 @@ func TestDelete(t *testing.T) {
 }
 
 func TestDeleteAllRows(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -300,7 +322,7 @@ func TestDeleteAllRows(t *testing.T) {
 // ============================================================
 
 func TestJoin(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 
@@ -375,7 +397,7 @@ func TestJoin(t *testing.T) {
 }
 
 func TestJoinWithWhere(t *testing.T) {
-	eng := memstore.New()
+	eng := setupEngine(t)
 	tx, _ := eng.Begin()
 	defer tx.Rollback()
 

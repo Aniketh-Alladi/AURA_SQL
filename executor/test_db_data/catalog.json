@@ -1,0 +1,44 @@
+[
+  {
+    "name": "users",
+    "schema": {
+      "Columns": [
+        {
+          "Name": "id",
+          "Type": 0
+        },
+        {
+          "Name": "name",
+          "Type": 1
+        },
+        {
+          "Name": "active",
+          "Type": 2
+        }
+      ]
+    }
+  },
+  {
+    "name": "orders",
+    "schema": {
+      "Columns": [
+        {
+          "Name": "order_id",
+          "Type": 0
+        },
+        {
+          "Name": "user_id",
+          "Type": 0
+        },
+        {
+          "Name": "product",
+          "Type": 1
+        },
+        {
+          "Name": "price",
+          "Type": 0
+        }
+      ]
+    }
+  }
+]
