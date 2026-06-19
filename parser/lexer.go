@@ -29,6 +29,11 @@ const (
 	TokenBoolType
 	TokenTrue
 	TokenFalse
+	TokenDelete // DELETE
+	TokenUpdate
+	TokenSet
+	TokenJoin
+	TokenOn
 
 	// Literals & Identifiers
 	TokenIdentifier
@@ -46,6 +51,9 @@ const (
 	TokenLe         // <=
 	TokenGt         // >
 	TokenGe         // >=
+	TokenDot        // .
+	TokenPlus       // +
+	TokenMinus      // -
 )
 
 func (t TokenType) String() string {
@@ -70,6 +78,16 @@ func (t TokenType) String() string {
 		return "INTO"
 	case TokenValues:
 		return "VALUES"
+	case TokenDelete:
+		return "DELETE"
+	case TokenUpdate:
+		return "UPDATE"
+	case TokenSet:
+		return "SET"
+	case TokenJoin:
+		return "JOIN"
+	case TokenOn:
+		return "ON"
 	case TokenAnd:
 		return "AND"
 	case TokenOr:
@@ -110,6 +128,12 @@ func (t TokenType) String() string {
 		return ">"
 	case TokenGe:
 		return ">="
+	case TokenDot:
+		return "."
+	case TokenPlus:
+		return "+"
+	case TokenMinus:
+		return "-"
 	default:
 		return "UNKNOWN"
 	}
@@ -133,6 +157,8 @@ func NewLexer(input string) *Lexer {
 }
 
 // NextToken scans and returns the next available Token.
+// NextToken scans and returns the next available Token.
+// NextToken scans and returns the next available Token.
 func (l *Lexer) NextToken() Token {
 	l.skipWhitespace()
 
@@ -140,10 +166,8 @@ func (l *Lexer) NextToken() Token {
 		return Token{Type: TokenEOF, Value: ""}
 	}
 
-	ch := l.input[l.pos]
-
-	// Punctuation & Operators
-	switch ch {
+	// Switch completely on the expression directly to satisfy QF1003
+	switch l.input[l.pos] {
 	case '(':
 		l.pos++
 		return Token{Type: TokenOpenParen, Value: "("}
@@ -156,16 +180,26 @@ func (l *Lexer) NextToken() Token {
 	case '*':
 		l.pos++
 		return Token{Type: TokenStar, Value: "*"}
+	case '.':
+		l.pos++
+		return Token{Type: TokenDot, Value: "."}
+	case '+':
+		l.pos++
+		return Token{Type: TokenPlus, Value: "+"}
+	case '-':
+		l.pos++
+		return Token{Type: TokenMinus, Value: "-"}
 	case '=':
 		l.pos++
 		return Token{Type: TokenEq, Value: "="}
 	case '<':
 		l.pos++
 		if l.pos < len(l.input) {
-			if l.input[l.pos] == '=' {
+			switch l.input[l.pos] {
+			case '=':
 				l.pos++
 				return Token{Type: TokenLe, Value: "<="}
-			} else if l.input[l.pos] == '>' {
+			case '>':
 				l.pos++
 				return Token{Type: TokenNe, Value: "<>"}
 			}
@@ -184,23 +218,24 @@ func (l *Lexer) NextToken() Token {
 			l.pos++
 			return Token{Type: TokenNe, Value: "!="}
 		}
-		return Token{Type: TokenError, Value: fmt.Sprintf("unexpected character '!'")}
+		return Token{Type: TokenError, Value: "unexpected character '!'"}
 	case '\'':
 		return l.readTextLiteral()
-	}
+	default:
+		ch := l.input[l.pos]
+		// Numbers
+		if unicode.IsDigit(ch) {
+			return l.readIntLiteral()
+		}
 
-	// Numbers
-	if unicode.IsDigit(ch) {
-		return l.readIntLiteral()
-	}
+		// Identifiers & Keywords
+		if isIdentifierStart(ch) {
+			return l.readIdentifierOrKeyword()
+		}
 
-	// Identifiers & Keywords
-	if isIdentifierStart(ch) {
-		return l.readIdentifierOrKeyword()
+		l.pos++
+		return Token{Type: TokenError, Value: fmt.Sprintf("unexpected character %q", string(ch))}
 	}
-
-	l.pos++
-	return Token{Type: TokenError, Value: fmt.Sprintf("unexpected character %q", string(ch))}
 }
 
 func (l *Lexer) skipWhitespace() {
@@ -258,6 +293,16 @@ func (l *Lexer) readIdentifierOrKeyword() Token {
 		return Token{Type: TokenInto, Value: val}
 	case "VALUES":
 		return Token{Type: TokenValues, Value: val}
+	case "DELETE": // <--- ADD THIS CASE HERE
+		return Token{Type: TokenDelete, Value: val}
+	case "UPDATE":
+		return Token{Type: TokenUpdate, Value: val}
+	case "SET":
+		return Token{Type: TokenSet, Value: val}
+	case "JOIN":
+		return Token{Type: TokenJoin, Value: val}
+	case "ON":
+		return Token{Type: TokenOn, Value: val}
 	case "AND":
 		return Token{Type: TokenAnd, Value: val}
 	case "OR":

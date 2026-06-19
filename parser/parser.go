@@ -47,9 +47,10 @@ func (p *Parser) parseStatement() (core.Statement, error) {
 		return p.parseInsert()
 	case TokenSelect:
 		return p.parseSelect()
-	// Future hooks for Phase 1:
-
-	// case TokenSelect: return p.parseSelect()
+	case TokenDelete: // <--- ADD THIS CASE
+		return p.parseDelete()
+	case TokenUpdate:
+		return p.parseUpdate()
 	default:
 		return nil, fmt.Errorf("unexpected statement starting with %q", p.currTok.Value)
 	}
@@ -190,20 +191,18 @@ func (p *Parser) parseInsert() (core.Statement, error) {
 func (p *Parser) parseSelect() (core.Statement, error) {
 	p.nextToken() // consume SELECT
 
+	// 1. Parse Projection List (Columns or '*')
 	var projection []core.Expr
-
-	// Check if it's a SELECT *
 	if p.currTok.Type == TokenStar {
 		projection = append(projection, &core.Star{})
-		p.nextToken() // consume '*'
+		p.nextToken()
 	} else {
-		// Parse comma-separated projection column expressions
 		for {
-			if p.currTok.Type != TokenIdentifier {
-				return nil, fmt.Errorf("expected column name in projection, got %q", p.currTok.Value)
+			expr, err := p.parseExpression()
+			if err != nil {
+				return nil, err
 			}
-			projection = append(projection, &core.ColumnRef{Name: p.currTok.Value})
-			p.nextToken() // consume column identifier
+			projection = append(projection, expr)
 
 			if p.currTok.Type == TokenComma {
 				p.nextToken() // consume ','
@@ -213,17 +212,46 @@ func (p *Parser) parseSelect() (core.Statement, error) {
 		}
 	}
 
+	// 2. Parse FROM Clause
 	if p.currTok.Type != TokenFrom {
-		return nil, fmt.Errorf("expected FROM, got %q", p.currTok.Value)
+		return nil, fmt.Errorf("expected FROM clause, got %q", p.currTok.Value)
 	}
 	p.nextToken() // consume FROM
 
 	if p.currTok.Type != TokenIdentifier {
-		return nil, fmt.Errorf("expected table name after FROM, got %q", p.currTok.Value)
+		return nil, fmt.Errorf("expected table name in FROM clause, got %q", p.currTok.Value)
 	}
-	tableName := p.currTok.Value
+	fromTable := p.currTok.Value
 	p.nextToken() // consume table name
 
+	// 3. Phase 2: Parse Optional JOIN Clause
+	var joinClause *core.JoinClause
+	if p.currTok.Type == TokenJoin {
+		p.nextToken() // consume JOIN
+
+		if p.currTok.Type != TokenIdentifier {
+			return nil, fmt.Errorf("expected table name after JOIN, got %q", p.currTok.Value)
+		}
+		joinTable := p.currTok.Value
+		p.nextToken() // consume join table name
+
+		if p.currTok.Type != TokenOn {
+			return nil, fmt.Errorf("expected ON keyword after JOIN table, got %q", p.currTok.Value)
+		}
+		p.nextToken() // consume ON
+
+		onExpr, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+
+		joinClause = &core.JoinClause{
+			Table: joinTable,
+			On:    onExpr,
+		}
+	}
+
+	// 4. Parse Optional WHERE Clause
 	var whereExpr core.Expr
 	if p.currTok.Type == TokenWhere {
 		p.nextToken() // consume WHERE
@@ -235,18 +263,18 @@ func (p *Parser) parseSelect() (core.Statement, error) {
 	}
 
 	if p.currTok.Type != TokenEOF {
-		return nil, fmt.Errorf("unexpected tokens at end of SELECT statement: %q", p.currTok.Value)
+		return nil, fmt.Errorf("unexpected trailing tokens after SELECT statement: %q", p.currTok.Value)
 	}
 
 	return &core.SelectStmt{
 		Projection: projection,
-		From:       tableName,
-		Join:       nil, // explicit Phase 1 requirement to leave nil
+		From:       fromTable,
+		Join:       joinClause, // Populated here!
 		Where:      whereExpr,
 	}, nil
 }
 
-// --- Expression Parsing Engine (Precedence Order: OR -> AND -> Comparisons -> Primary Literals) ---
+// --- Phase 2 Expression Parsing Engine with Precedence ---
 
 func (p *Parser) parseExpression() (core.Expr, error) {
 	return p.parseOr()
@@ -257,9 +285,8 @@ func (p *Parser) parseOr() (core.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	for p.currTok.Type == TokenOr {
-		p.nextToken() // consume OR
+		p.nextToken()
 		right, err := p.parseAnd()
 		if err != nil {
 			return nil, err
@@ -274,9 +301,8 @@ func (p *Parser) parseAnd() (core.Expr, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	for p.currTok.Type == TokenAnd {
-		p.nextToken() // consume AND
+		p.nextToken()
 		right, err := p.parseComparison()
 		if err != nil {
 			return nil, err
@@ -287,7 +313,7 @@ func (p *Parser) parseAnd() (core.Expr, error) {
 }
 
 func (p *Parser) parseComparison() (core.Expr, error) {
-	left, err := p.parsePrimaryExpr()
+	left, err := p.parseAdditive() // Phase 2: routes to arithmetic next
 	if err != nil {
 		return nil, err
 	}
@@ -307,37 +333,78 @@ func (p *Parser) parseComparison() (core.Expr, error) {
 	case TokenGe:
 		op = core.OpGe
 	default:
-		return left, nil // No comparison operator found; return bare primary (e.g., bare booleans)
+		return left, nil
 	}
 
-	p.nextToken() // consume operator
-	right, err := p.parsePrimaryExpr()
+	p.nextToken()
+	right, err := p.parseAdditive()
+	if err != nil {
+		return nil, err
+	}
+	return &core.BinaryExpr{Op: op, Left: left, Right: right}, nil
+}
+
+// parseAdditive handles Phase 2 arithmetic: + and -
+func (p *Parser) parseAdditive() (core.Expr, error) {
+	left, err := p.parsePrimaryExpr()
 	if err != nil {
 		return nil, err
 	}
 
-	return &core.BinaryExpr{Op: op, Left: left, Right: right}, nil
+	for p.currTok.Type == TokenPlus || p.currTok.Type == TokenMinus {
+		var op core.BinOp
+		if p.currTok.Type == TokenPlus {
+			op = core.OpAdd
+		} else {
+			op = core.OpSub
+		}
+		p.nextToken() // consume + or -
+
+		right, err := p.parsePrimaryExpr()
+		if err != nil {
+			return nil, err
+		}
+		left = &core.BinaryExpr{Op: op, Left: left, Right: right}
+	}
+	return left, nil
 }
 
-// parsePrimaryExpr parses basic units: integers, text, booleans, or column identifiers
+// parsePrimaryExpr parses basic units including table-qualified columns (e.g., users.id)
 func (p *Parser) parsePrimaryExpr() (core.Expr, error) {
 	switch p.currTok.Type {
 	case TokenIdentifier:
-		name := p.currTok.Value
+		nameOrTable := p.currTok.Value
 		p.nextToken() // consume identifier
-		return &core.ColumnRef{Name: name}, nil
+
+		// Phase 2 Check: If followed by a '.', this is a qualified reference: table.column
+		if p.currTok.Type == TokenDot {
+			p.nextToken() // consume '.'
+			if p.currTok.Type != TokenIdentifier {
+				return nil, fmt.Errorf("expected column identifier after '.', got %q", p.currTok.Value)
+			}
+			colName := p.currTok.Value
+			p.nextToken() // consume column identifier
+
+			return &core.ColumnRef{
+				Table: nameOrTable, // Maps to the table string property in core.ColumnRef
+				Name:  colName,
+			}, nil
+		}
+
+		// Unqualified column fallback (Phase 1)
+		return &core.ColumnRef{Table: "", Name: nameOrTable}, nil
 
 	case TokenIntLiteral:
 		val, err := strconv.ParseInt(p.currTok.Value, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid integer literal %q: %v", p.currTok.Value, err)
 		}
-		p.nextToken() // consume int literal
+		p.nextToken()
 		return &core.Literal{Value: core.NewInt(val)}, nil
 
 	case TokenTextLiteral:
 		text := p.currTok.Value
-		p.nextToken() // consume text literal
+		p.nextToken()
 		return &core.Literal{Value: core.NewText(text)}, nil
 
 	case TokenTrue:
@@ -345,10 +412,114 @@ func (p *Parser) parsePrimaryExpr() (core.Expr, error) {
 		return &core.Literal{Value: core.NewBool(true)}, nil
 
 	case TokenFalse:
-		p.nextToken() // consume false
-		return &core.Literal{Value: core.NewBool(false)}, nil
+		p.nextToken()                                         // consume false
+		return &core.Literal{Value: core.NewBool(false)}, nil // standard core pattern:
+		// return &core.Literal{Value: core.NewBool(false)}, nil
 
 	default:
 		return nil, fmt.Errorf("expected expression primary element, got %q", p.currTok.Value)
 	}
+}
+
+// parseDelete handles: DELETE FROM <table_name> [WHERE <expr>]
+func (p *Parser) parseDelete() (core.Statement, error) {
+	p.nextToken() // consume DELETE
+
+	if p.currTok.Type != TokenFrom {
+		return nil, fmt.Errorf("expected FROM after DELETE, got %q", p.currTok.Value)
+	}
+	p.nextToken() // consume FROM
+
+	if p.currTok.Type != TokenIdentifier {
+		return nil, fmt.Errorf("expected table name, got %q", p.currTok.Value)
+	}
+	tableName := p.currTok.Value
+	p.nextToken() // consume table name
+
+	var whereExpr core.Expr
+	if p.currTok.Type == TokenWhere {
+		p.nextToken() // consume WHERE
+		var err error
+		whereExpr, err = p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if p.currTok.Type != TokenEOF {
+		return nil, fmt.Errorf("unexpected tokens after DELETE statement: %q", p.currTok.Value)
+	}
+
+	return &core.DeleteStmt{
+		Table: tableName,
+		Where: whereExpr,
+	}, nil
+}
+
+// parseUpdate handles: UPDATE <table_name> SET col = expr [, col = expr] [WHERE <expr>]
+func (p *Parser) parseUpdate() (core.Statement, error) {
+	p.nextToken() // consume UPDATE
+
+	if p.currTok.Type != TokenIdentifier {
+		return nil, fmt.Errorf("expected table name after UPDATE, got %q", p.currTok.Value)
+	}
+	tableName := p.currTok.Value
+	p.nextToken() // consume table name
+
+	if p.currTok.Type != TokenSet {
+		return nil, fmt.Errorf("expected SET keyword, got %q", p.currTok.Value)
+	}
+	p.nextToken() // consume SET
+
+	var assignments []core.Assignment
+
+	// Parse comma-separated col = expr pairs
+	for {
+		if p.currTok.Type != TokenIdentifier {
+			return nil, fmt.Errorf("expected column identifier in SET clause, got %q", p.currTok.Value)
+		}
+		colName := p.currTok.Value
+		p.nextToken() // consume column identifier
+
+		if p.currTok.Type != TokenEq {
+			return nil, fmt.Errorf("expected '=' after column %s, got %q", colName, p.currTok.Value)
+		}
+		p.nextToken() // consume '='
+
+		expr, err := p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+
+		assignments = append(assignments, core.Assignment{
+			Column: colName,
+			Value:  expr,
+		})
+
+		if p.currTok.Type == TokenComma {
+			p.nextToken() // consume ',' and parse next assignment
+			continue
+		}
+		break
+	}
+
+	var whereExpr core.Expr
+	if p.currTok.Type == TokenWhere {
+		p.nextToken() // consume WHERE
+		var err error
+		whereExpr, err = p.parseExpression()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if p.currTok.Type != TokenEOF {
+		return nil, fmt.Errorf("unexpected tokens after UPDATE statement: %q", p.currTok.Value)
+	}
+
+	return &core.UpdateStmt{
+		Table: tableName,
+		Set:   assignments,
+		Where: whereExpr,
+	}, nil
 }
