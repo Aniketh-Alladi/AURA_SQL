@@ -6,7 +6,6 @@ import (
 	"aurasql/core"
 )
 
-// eval evaluates an expression in the context of a row and schema.
 func eval(e core.Expr, row core.Row, schema core.Schema) (core.Value, error) {
 	switch expr := e.(type) {
 	case *core.Literal:
@@ -27,24 +26,6 @@ func eval(e core.Expr, row core.Row, schema core.Schema) (core.Value, error) {
 	}
 }
 
-// evalWhere evaluates a WHERE clause to a boolean.
-func evalWhere(expr core.Expr, row core.Row, schema core.Schema) (bool, error) {
-	if expr == nil {
-		return true, nil
-	}
-	val, err := eval(expr, row, schema)
-	if err != nil {
-		return false, err
-	}
-	if val.Null {
-		return false, nil
-	}
-	if val.Type != core.TypeBool {
-		return false, fmt.Errorf("WHERE must evaluate to boolean, got %s", val.Type)
-	}
-	return val.Bool, nil
-}
-
 func evalBinary(expr *core.BinaryExpr, row core.Row, schema core.Schema) (core.Value, error) {
 	left, err := eval(expr.Left, row, schema)
 	if err != nil {
@@ -53,31 +34,6 @@ func evalBinary(expr *core.BinaryExpr, row core.Row, schema core.Schema) (core.V
 	right, err := eval(expr.Right, row, schema)
 	if err != nil {
 		return core.Value{}, err
-	}
-
-	// Handle NULLs
-	if left.Null || right.Null {
-		switch expr.Op {
-		case core.OpAnd:
-			if !left.Null && left.Type == core.TypeBool && !left.Bool {
-				return core.NewBool(false), nil
-			}
-			if !right.Null && right.Type == core.TypeBool && !right.Bool {
-				return core.NewBool(false), nil
-			}
-			return core.NullValue(core.TypeBool), nil
-		case core.OpOr:
-			if !left.Null && left.Type == core.TypeBool && left.Bool {
-				return core.NewBool(true), nil
-			}
-			if !right.Null && right.Type == core.TypeBool && right.Bool {
-				return core.NewBool(true), nil
-			}
-			return core.NullValue(core.TypeBool), nil
-		default:
-			// Comparisons with NULL return NULL
-			return core.NullValue(core.TypeBool), nil
-		}
 	}
 
 	switch expr.Op {
@@ -95,16 +51,6 @@ func evalBinary(expr *core.BinaryExpr, row core.Row, schema core.Schema) (core.V
 			return core.Value{}, err
 		}
 		return core.NewBool(l || r), nil
-	case core.OpAdd:
-		if left.Type != core.TypeInt || right.Type != core.TypeInt {
-			return core.Value{}, fmt.Errorf("+ requires integer operands, got %s and %s", left.Type, right.Type)
-		}
-		return core.NewInt(left.Int + right.Int), nil
-	case core.OpSub:
-		if left.Type != core.TypeInt || right.Type != core.TypeInt {
-			return core.Value{}, fmt.Errorf("- requires integer operands, got %s and %s", left.Type, right.Type)
-		}
-		return core.NewInt(left.Int - right.Int), nil
 	default:
 		return core.Value{}, fmt.Errorf("unsupported binary operator %d", expr.Op)
 	}

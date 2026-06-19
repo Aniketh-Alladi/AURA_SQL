@@ -6,8 +6,6 @@ import (
 	"aurasql/core"
 )
 
-// Execute processes a parsed SQL statement against the storage engine.
-// Now builds operator trees instead of direct execution.
 func Execute(eng core.StorageEngine, txn core.Txn, stmt core.Statement) (core.Result, error) {
 	if eng == nil {
 		return core.Result{}, fmt.Errorf("storage engine is nil")
@@ -21,269 +19,173 @@ func Execute(eng core.StorageEngine, txn core.Txn, stmt core.Statement) (core.Re
 
 	switch s := stmt.(type) {
 	case *core.CreateTableStmt:
-		return executeCreateTable(eng, txn, s)
+		schema := core.Schema{Columns: s.Columns}
+		if err := eng.CreateTable(txn, s.Table, schema); err != nil {
+			return core.Result{}, fmt.Errorf("create table %q: %w", s.Table, err)
+		}
+		return core.Result{}, nil
 	case *core.InsertStmt:
-		return executeInsert(eng, txn, s)
+		schema, ok := eng.GetSchema(s.Table)
+		if !ok {
+			return core.Result{}, fmt.Errorf("table %q does not exist", s.Table)
+		}
+		if len(s.Values) != len(schema.Columns) {
+			return core.Result{}, fmt.Errorf("insert into %q has %d values for %d columns", s.Table, len(s.Values), len(schema.Columns))
+		}
+
+		values := make([]core.Value, len(s.Values))
+		for i, expr := range s.Values {
+			value, err := eval(expr, core.Row{}, core.Schema{})
+			if err != nil {
+				return core.Result{}, fmt.Errorf("insert into %q value for column %q: %w", s.Table, schema.Columns[i].Name, err)
+			}
+			if value.Type != schema.Columns[i].Type {
+				return core.Result{}, fmt.Errorf("insert into %q column %q expects %s, got %s", s.Table, schema.Columns[i].Name, schema.Columns[i].Type, value.Type)
+			}
+			values[i] = value
+		}
+
+		row := core.Row{
+			Values: values,
+		}
+		if _, err := eng.Insert(txn, s.Table, row); err != nil {
+			return core.Result{}, fmt.Errorf("insert into %q: %w", s.Table, err)
+		}
+		return core.Result{RowsAffected: 1}, nil
 	case *core.SelectStmt:
-		return executeSelect(eng, txn, s)
-	case *core.UpdateStmt:
-		return executeUpdate(eng, txn, s)
-	case *core.DeleteStmt:
-		return executeDelete(eng, txn, s)
+		schema, ok := eng.GetSchema(s.From)
+		if !ok {
+			return core.Result{}, fmt.Errorf("table %q does not exist", s.From)
+		}
+		if s.Join != nil {
+			return core.Result{}, fmt.Errorf("select from %q: joins are not supported", s.From)
+		}
+
+		selectStar := isStarProjection(s.Projection)
+		resultSchema := schema
+		if !selectStar {
+			projectedSchema, err := buildProjectionSchema(s.Projection, schema)
+			if err != nil {
+				return core.Result{}, fmt.Errorf("select from %q: %w", s.From, err)
+			}
+			resultSchema = projectedSchema
+		}
+
+		it, err := eng.Scan(txn, s.From)
+		if err != nil {
+			return core.Result{}, fmt.Errorf("select from %q: %w", s.From, err)
+		}
+
+		rows := []core.Row{}
+		for {
+			_, row, ok, err := it.Next()
+			if err != nil {
+				closeErr := it.Close()
+				if closeErr != nil {
+					return core.Result{}, fmt.Errorf("select from %q: scan error: %v; close error: %w", s.From, err, closeErr)
+				}
+				return core.Result{}, fmt.Errorf("select from %q: %w", s.From, err)
+			}
+			if !ok {
+				break
+			}
+			if s.Where != nil {
+				matches, err := rowMatchesWhere(s.Where, row, schema)
+				if err != nil {
+					closeErr := it.Close()
+					if closeErr != nil {
+						return core.Result{}, fmt.Errorf("select from %q: where error: %v; close error: %w", s.From, err, closeErr)
+					}
+					return core.Result{}, fmt.Errorf("select from %q: where: %w", s.From, err)
+				}
+				if !matches {
+					continue
+				}
+			}
+			if selectStar {
+				rows = append(rows, row)
+				continue
+			}
+
+			projectedRow, err := projectRow(s.Projection, row, schema)
+			if err != nil {
+				closeErr := it.Close()
+				if closeErr != nil {
+					return core.Result{}, fmt.Errorf("select from %q: projection error: %v; close error: %w", s.From, err, closeErr)
+				}
+				return core.Result{}, fmt.Errorf("select from %q: projection: %w", s.From, err)
+			}
+			rows = append(rows, projectedRow)
+		}
+		if err := it.Close(); err != nil {
+			return core.Result{}, fmt.Errorf("select from %q: close iterator: %w", s.From, err)
+		}
+
+		return core.Result{
+			Schema: resultSchema,
+			Rows:   rows,
+		}, nil
 	default:
 		return core.Result{}, fmt.Errorf("unsupported statement type %T", stmt)
 	}
 }
 
-// ============================================================
-// DDL
-// ============================================================
-
-func executeCreateTable(eng core.StorageEngine, txn core.Txn, stmt *core.CreateTableStmt) (core.Result, error) {
-	schema := core.Schema{Columns: stmt.Columns}
-	if err := eng.CreateTable(txn, stmt.Table, schema); err != nil {
-		return core.Result{}, fmt.Errorf("create table %q: %w", stmt.Table, err)
+func isStarProjection(projection []core.Expr) bool {
+	if len(projection) != 1 {
+		return false
 	}
-	return core.Result{}, nil
+	_, ok := projection[0].(*core.Star)
+	return ok
 }
 
-// ============================================================
-// DML: INSERT
-// ============================================================
-
-func executeInsert(eng core.StorageEngine, txn core.Txn, stmt *core.InsertStmt) (core.Result, error) {
-	schema, ok := eng.GetSchema(stmt.Table)
-	if !ok {
-		return core.Result{}, fmt.Errorf("table %q does not exist", stmt.Table)
+func rowMatchesWhere(where core.Expr, row core.Row, schema core.Schema) (bool, error) {
+	value, err := eval(where, row, schema)
+	if err != nil {
+		return false, err
 	}
-	if len(stmt.Values) != len(schema.Columns) {
-		return core.Result{}, fmt.Errorf("insert into %q has %d values for %d columns",
-			stmt.Table, len(stmt.Values), len(schema.Columns))
+	if value.Null || value.Type != core.TypeBool {
+		return false, fmt.Errorf("where must evaluate to a non-null boolean")
 	}
+	return value.Bool, nil
+}
 
-	values := make([]core.Value, len(stmt.Values))
-	for i, expr := range stmt.Values {
-		value, err := eval(expr, core.Row{}, core.Schema{})
+func projectRow(projection []core.Expr, row core.Row, schema core.Schema) (core.Row, error) {
+	values := make([]core.Value, len(projection))
+	for i, expr := range projection {
+		value, err := eval(expr, row, schema)
 		if err != nil {
-			return core.Result{}, fmt.Errorf("insert into %q value for column %q: %w",
-				stmt.Table, schema.Columns[i].Name, err)
-		}
-		// FIX: Check value.Null instead of core.TypeNull
-		if !value.Null && value.Type != schema.Columns[i].Type {
-			return core.Result{}, fmt.Errorf("insert into %q column %q expects %s, got %s",
-				stmt.Table, schema.Columns[i].Name, schema.Columns[i].Type, value.Type)
+			return core.Row{}, err
 		}
 		values[i] = value
 	}
-
-	row := core.Row{Values: values}
-	if _, err := eng.Insert(txn, stmt.Table, row); err != nil {
-		return core.Result{}, fmt.Errorf("insert into %q: %w", stmt.Table, err)
-	}
-	return core.Result{RowsAffected: 1}, nil
+	return core.Row{Values: values}, nil
 }
 
-// ============================================================
-// DML: SELECT (using operator model)
-// ============================================================
-
-func executeSelect(eng core.StorageEngine, txn core.Txn, stmt *core.SelectStmt) (core.Result, error) {
-	// Build the operator tree
-	root, err := buildSelectPlan(eng, txn, stmt)
-	if err != nil {
-		return core.Result{}, fmt.Errorf("build plan for %q: %w", stmt.From, err)
-	}
-	defer root.Close()
-
-	// Drain the operator
-	rows := []core.Row{}
-	for {
-		row, ok, err := root.Next()
+func buildProjectionSchema(projection []core.Expr, schema core.Schema) (core.Schema, error) {
+	columns := make([]core.Column, len(projection))
+	for i, expr := range projection {
+		column, err := projectionColumn(expr, i, schema)
 		if err != nil {
-			return core.Result{}, fmt.Errorf("execute plan: %w", err)
+			return core.Schema{}, err
 		}
-		if !ok {
-			break
-		}
-		rows = append(rows, row)
+		columns[i] = column
 	}
-
-	return core.Result{
-		Schema: root.Schema(),
-		Rows:   rows,
-	}, nil
+	return core.Schema{Columns: columns}, nil
 }
 
-func buildSelectPlan(eng core.StorageEngine, txn core.Txn, stmt *core.SelectStmt) (Operator, error) {
-	// Start with ScanOp for the FROM table
-	scan, err := NewScanOp(eng, txn, stmt.From)
-	if err != nil {
-		return nil, err
-	}
-	var root Operator = scan
-
-	// Add JOIN if present
-	if stmt.Join != nil {
-		rightScan, err := NewScanOp(eng, txn, stmt.Join.Table)
-		if err != nil {
-			return nil, fmt.Errorf("join table %q: %w", stmt.Join.Table, err)
+func projectionColumn(expr core.Expr, index int, schema core.Schema) (core.Column, error) {
+	switch e := expr.(type) {
+	case *core.ColumnRef:
+		columnIndex := schema.ColumnIndex(e.Name)
+		if columnIndex < 0 {
+			return core.Column{}, fmt.Errorf("column %q does not exist", e.Name)
 		}
-		join, err := NewNestedLoopJoinOp(root, rightScan, stmt.Join.On)
-		if err != nil {
-			return nil, fmt.Errorf("create join: %w", err)
-		}
-		root = join
+		return core.Column{Name: e.Name, Type: schema.Columns[columnIndex].Type}, nil
+	case *core.Literal:
+		return core.Column{Name: fmt.Sprintf("expr%d", index+1), Type: e.Value.Type}, nil
+	case *core.BinaryExpr:
+		return core.Column{Name: fmt.Sprintf("expr%d", index+1), Type: core.TypeBool}, nil
+	default:
+		return core.Column{}, fmt.Errorf("unsupported projection expression type %T", expr)
 	}
-
-	// Add WHERE filter
-	if stmt.Where != nil {
-		root = NewFilterOp(root, stmt.Where)
-	}
-
-	// Add projection
-	project, err := NewProjectOp(root, stmt.Projection)
-	if err != nil {
-		return nil, fmt.Errorf("create projection: %w", err)
-	}
-	root = project
-
-	return root, nil
-}
-
-// ============================================================
-// DML: UPDATE (materialize-then-mutate)
-// ============================================================
-
-func executeUpdate(eng core.StorageEngine, txn core.Txn, stmt *core.UpdateStmt) (core.Result, error) {
-	schema, ok := eng.GetSchema(stmt.Table)
-	if !ok {
-		return core.Result{}, fmt.Errorf("table %q does not exist", stmt.Table)
-	}
-
-	// Phase 1: Materialize matching RowIDs
-	iter, err := eng.Scan(txn, stmt.Table)
-	if err != nil {
-		return core.Result{}, fmt.Errorf("scan table %q: %w", stmt.Table, err)
-	}
-	defer iter.Close()
-
-	var rowIDs []core.RowID
-	var rows []core.Row
-
-	for {
-		rowID, row, ok, err := iter.Next()
-		if err != nil {
-			return core.Result{}, fmt.Errorf("scan next: %w", err)
-		}
-		if !ok {
-			break
-		}
-
-		// Apply WHERE clause (nil WHERE = all rows)
-		if stmt.Where != nil {
-			matches, err := evalWhere(stmt.Where, row, schema)
-			if err != nil {
-				return core.Result{}, fmt.Errorf("where clause: %w", err)
-			}
-			if !matches {
-				continue
-			}
-		}
-		rowIDs = append(rowIDs, rowID)
-		rows = append(rows, row)
-	}
-
-	// Phase 2: Apply updates to materialized rows
-	if err := iter.Close(); err != nil {
-		return core.Result{}, fmt.Errorf("close scan: %w", err)
-	}
-
-	for i, rowID := range rowIDs {
-		row := rows[i]
-		newRow, err := applyUpdateAssignments(stmt.Set, row, schema)
-		if err != nil {
-			return core.Result{}, fmt.Errorf("apply assignments for row %d: %w", i, err)
-		}
-		if err := eng.Update(txn, stmt.Table, rowID, newRow); err != nil {
-			return core.Result{}, fmt.Errorf("update row %d: %w", i, err)
-		}
-	}
-
-	return core.Result{RowsAffected: len(rowIDs)}, nil
-}
-
-func applyUpdateAssignments(assignments []core.Assignment, row core.Row, schema core.Schema) (core.Row, error) {
-	newRow := row
-	for _, assign := range assignments {
-		idx := schema.ColumnIndex(assign.Column)
-		if idx < 0 {
-			return core.Row{}, fmt.Errorf("column %q does not exist", assign.Column)
-		}
-		val, err := eval(assign.Value, row, schema)
-		if err != nil {
-			return core.Row{}, fmt.Errorf("evaluate assignment for %q: %w", assign.Column, err)
-		}
-		// FIX: Check value.Null instead of core.TypeNull
-		if !val.Null && val.Type != schema.Columns[idx].Type {
-			return core.Row{}, fmt.Errorf("type mismatch for column %q: expected %s, got %s",
-				assign.Column, schema.Columns[idx].Type, val.Type)
-		}
-		newRow.Values[idx] = val
-	}
-	return newRow, nil
-}
-
-// ============================================================
-// DML: DELETE (materialize-then-mutate)
-// ============================================================
-
-func executeDelete(eng core.StorageEngine, txn core.Txn, stmt *core.DeleteStmt) (core.Result, error) {
-	schema, ok := eng.GetSchema(stmt.Table)
-	if !ok {
-		return core.Result{}, fmt.Errorf("table %q does not exist", stmt.Table)
-	}
-
-	// Phase 1: Materialize matching RowIDs
-	iter, err := eng.Scan(txn, stmt.Table)
-	if err != nil {
-		return core.Result{}, fmt.Errorf("scan table %q: %w", stmt.Table, err)
-	}
-	defer iter.Close()
-
-	var rowIDs []core.RowID
-
-	for {
-		rowID, row, ok, err := iter.Next()
-		if err != nil {
-			return core.Result{}, fmt.Errorf("scan next: %w", err)
-		}
-		if !ok {
-			break
-		}
-
-		// Apply WHERE clause (nil WHERE = all rows)
-		if stmt.Where != nil {
-			matches, err := evalWhere(stmt.Where, row, schema)
-			if err != nil {
-				return core.Result{}, fmt.Errorf("where clause: %w", err)
-			}
-			if !matches {
-				continue
-			}
-		}
-		rowIDs = append(rowIDs, rowID)
-	}
-
-	// Phase 2: Delete materialized rows
-	if err := iter.Close(); err != nil {
-		return core.Result{}, fmt.Errorf("close scan: %w", err)
-	}
-
-	for _, rowID := range rowIDs {
-		if err := eng.Delete(txn, stmt.Table, rowID); err != nil {
-			return core.Result{}, fmt.Errorf("delete row %d: %w", rowID, err)
-		}
-	}
-
-	return core.Result{RowsAffected: len(rowIDs)}, nil
 }
