@@ -6,9 +6,7 @@ control (MVCC) you can watch prevent transaction anomalies live.
 
 > Status: in development. Built by a team of three as a from-scratch systems project.
 
-<!-- TODO: add the CI status badge once the repo is on GitHub:
-[![CI](https://github.com/<owner>/AURA_SQL/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/AURA_SQL/actions/workflows/ci.yml)
--->
+[![CI](https://github.com/Aniketh-Alladi/AURA_SQL/actions/workflows/ci.yml/badge.svg)](https://github.com/Aniketh-Alladi/AURA_SQL/actions/workflows/ci.yml)
 
 ## What it does
 
