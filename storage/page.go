@@ -193,33 +193,28 @@ func (p *Page) Delete(slotIndex int) error {
 	return nil
 }
 
-// Update replaces the data for an existing slot without changing the slot index.
-// In Phase 1, we simply append the new data and abandon the old data's space.
+// Update attempts to replace the data for an existing slot in-place.
+// If the new data is larger than the old data, it returns an error.
 func (p *Page) Update(slotIndex int, rowBytes []byte) error {
 	slotCount := int(endian.Uint16(p.Data[0:2]))
 	if slotIndex < 0 || slotIndex >= slotCount {
 		return errors.New("invalid slot index")
 	}
 
-	freeSpace := int(endian.Uint16(p.Data[2:4]))
-	slotDirectoryEnd := 4 + (slotCount * 4)
+	entryOffset := 4 + (slotIndex * 4)
+	dataOffset := int(endian.Uint16(p.Data[entryOffset : entryOffset+2]))
+	oldLength := int(endian.Uint16(p.Data[entryOffset+2 : entryOffset+4]))
 
-	// Check if we have enough room for the new bytes
-	if freeSpace-slotDirectoryEnd < len(rowBytes) {
-		return errors.New("page is full")
+	// Gear 1: The new row is the same size or smaller. Overwrite it in place!
+	if len(rowBytes) <= oldLength {
+		// Copy the new bytes directly over the old bytes
+		copy(p.Data[dataOffset:dataOffset+len(rowBytes)], rowBytes)
+		
+		// Update the length in the slot directory (the offset stays exactly the same)
+		endian.PutUint16(p.Data[entryOffset+2:entryOffset+4], uint16(len(rowBytes)))
+		return nil
 	}
 
-	// Move free space down and write the new data
-	newFreeSpace := freeSpace - len(rowBytes)
-	copy(p.Data[newFreeSpace:freeSpace], rowBytes)
-
-	// Update the existing slot entry to point to the new data
-	entryOffset := 4 + (slotIndex * 4)
-	endian.PutUint16(p.Data[entryOffset:entryOffset+2], uint16(newFreeSpace))
-	endian.PutUint16(p.Data[entryOffset+2:entryOffset+4], uint16(len(rowBytes)))
-
-	// Update the page's free space pointer
-	endian.PutUint16(p.Data[2:4], uint16(newFreeSpace))
-
-	return nil
+	// Gear 2: The new row has a longer TEXT string and doesn't fit in the old slot.
+	return errors.New("row too large")
 }

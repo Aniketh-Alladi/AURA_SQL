@@ -33,16 +33,21 @@ type Engine struct {
 
 // New creates a new StorageEngine saving data to the specified directory.
 func New(dataDir string) (*Engine, error) {
-	// Ensure the data directory exists
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, err
 	}
+	
+	cat := NewCatalog()
+	// Ask the catalog to rebuild itself from disk
+	if err := cat.Load(dataDir); err != nil {
+		return nil, err
+	}
+
 	return &Engine{
-		catalog: NewCatalog(),
+		catalog: cat,
 		dataDir: dataDir,
 	}, nil
 }
-
 func (e *Engine) Begin() (core.Txn, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -67,7 +72,13 @@ func (e *Engine) CreateTable(_ core.Txn, name string, schema core.Schema) error 
 	hf.SetBufferPool(pool)
 
 	// Register it in the catalog
-	return e.catalog.AddTable(name, schema, hf)
+	err = e.catalog.AddTable(name, schema, hf)
+	if err != nil {
+		return err
+	}
+    
+	// Flush the new catalog state to disk
+	return e.catalog.Save(e.dataDir)
 }
 
 func (e *Engine) DropTable(_ core.Txn, name string) error {
@@ -84,7 +95,13 @@ func (e *Engine) DropTable(_ core.Txn, name string) error {
 	meta.HeapFile.Close()
 	os.Remove(meta.HeapFile.file.Name())
 
-	return e.catalog.DropTable(name)
+	err = e.catalog.DropTable(name)
+	if err != nil {
+		return err
+	}
+    
+	// Flush the updated catalog state to disk
+	return e.catalog.Save(e.dataDir)
 }
 
 func (e *Engine) GetSchema(name string) (core.Schema, bool) {
