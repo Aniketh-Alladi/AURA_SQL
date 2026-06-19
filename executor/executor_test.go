@@ -12,7 +12,7 @@ import (
 func setupEngine(t *testing.T) core.StorageEngine {
 	t.Helper()
 	dir := t.TempDir()
-	
+
 	eng, err := storage.New(dir)
 	if err != nil {
 		t.Fatalf("failed to create storage engine: %v", err)
@@ -24,6 +24,7 @@ func setupEngine(t *testing.T) core.StorageEngine {
 
 	return eng
 }
+
 // ============================================================
 // Phase 1 tests (should still pass with refactored code)
 // ============================================================
@@ -182,7 +183,7 @@ func TestUpdate(t *testing.T) {
 		t.Errorf("expected 1 row affected, got %d", result.RowsAffected)
 	}
 
-// Verify
+	// Verify
 	selectStmt := &core.SelectStmt{
 		Projection: []core.Expr{&core.Star{}},
 		From:       "users",
@@ -192,13 +193,13 @@ func TestUpdate(t *testing.T) {
 	if len(selectResult.Rows) != 3 {
 		t.Fatalf("expected 3 rows, got %d", len(selectResult.Rows))
 	}
-	
-	// Because of Gear-2 updates, the physical order might change. 
+
+	// Because of Gear-2 updates, the physical order might change.
 	// We must check values by their ID, not their array index!
 	for _, row := range selectResult.Rows {
 		id := row.Values[0].Int
 		name := row.Values[1].Str
-		
+
 		if id == 1 && name != "updated" {
 			t.Errorf("expected id 1 to be 'updated', got %v", name)
 		}

@@ -206,7 +206,6 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 	return 0, core.Row{}, false, nil
 }
 
-
 // Close gracefully shuts down the engine, flushing caches and releasing file locks.
 func (e *Engine) Close() error {
 	e.mu.Lock()
@@ -223,4 +222,3 @@ func (e *Engine) Close() error {
 func (it *heapFileIterator) Close() error {
 	return nil // We don't have any active file locks tied to the iterator itself right now
 }
-
