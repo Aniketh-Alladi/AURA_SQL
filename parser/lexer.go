@@ -34,6 +34,7 @@ const (
 	TokenSet
 	TokenJoin
 	TokenOn
+	TokenIndex // INDEX
 
 	// Literals & Identifiers
 	TokenIdentifier
@@ -88,6 +89,8 @@ func (t TokenType) String() string {
 		return "JOIN"
 	case TokenOn:
 		return "ON"
+	case TokenIndex:
+		return "INDEX"
 	case TokenAnd:
 		return "AND"
 	case TokenOr:
@@ -303,6 +306,8 @@ func (l *Lexer) readIdentifierOrKeyword() Token {
 		return Token{Type: TokenJoin, Value: val}
 	case "ON":
 		return Token{Type: TokenOn, Value: val}
+	case "INDEX":
+		return Token{Type: TokenIndex, Value: val}
 	case "AND":
 		return Token{Type: TokenAnd, Value: val}
 	case "OR":
