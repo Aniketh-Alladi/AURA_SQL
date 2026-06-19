@@ -166,7 +166,7 @@ func (hf *HeapFile) Update(id core.RowID, rowBytes []byte) error {
 		if err := hf.Delete(id); err != nil {
 			return err
 		}
-		
+
 		// Insert the new row (this handles finding free space or creating a new page)
 		_, err := hf.Insert(rowBytes)
 		return err
@@ -174,6 +174,7 @@ func (hf *HeapFile) Update(id core.RowID, rowBytes []byte) error {
 
 	return err
 }
+
 // Delete removes a row logically in memory.
 func (hf *HeapFile) Delete(id core.RowID) error {
 	pageID, slotIndex := decodeRowID(id)

@@ -36,7 +36,7 @@ func New(dataDir string) (*Engine, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, err
 	}
-	
+
 	cat := NewCatalog()
 	// Ask the catalog to rebuild itself from disk
 	if err := cat.Load(dataDir); err != nil {
@@ -76,7 +76,7 @@ func (e *Engine) CreateTable(_ core.Txn, name string, schema core.Schema) error 
 	if err != nil {
 		return err
 	}
-    
+
 	// Flush the new catalog state to disk
 	return e.catalog.Save(e.dataDir)
 }
@@ -99,7 +99,7 @@ func (e *Engine) DropTable(_ core.Txn, name string) error {
 	if err != nil {
 		return err
 	}
-    
+
 	// Flush the updated catalog state to disk
 	return e.catalog.Save(e.dataDir)
 }

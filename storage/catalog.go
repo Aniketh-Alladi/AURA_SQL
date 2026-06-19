@@ -8,6 +8,7 @@ import (
 
 	"aurasql/core"
 )
+
 // TableMetadata holds everything the system needs to know about a single table.
 type TableMetadata struct {
 	Name     string

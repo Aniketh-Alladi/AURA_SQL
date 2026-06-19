@@ -209,7 +209,7 @@ func (p *Page) Update(slotIndex int, rowBytes []byte) error {
 	if len(rowBytes) <= oldLength {
 		// Copy the new bytes directly over the old bytes
 		copy(p.Data[dataOffset:dataOffset+len(rowBytes)], rowBytes)
-		
+
 		// Update the length in the slot directory (the offset stays exactly the same)
 		endian.PutUint16(p.Data[entryOffset+2:entryOffset+4], uint16(len(rowBytes)))
 		return nil
