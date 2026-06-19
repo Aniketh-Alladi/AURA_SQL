@@ -142,7 +142,8 @@ func (hf *HeapFile) Get(id core.RowID) ([]byte, error) {
 	return page.Get(slotIndex)
 }
 
-// Update modifies an existing row in place in memory.
+// Update modifies an existing row. It attempts an in-place update first.
+// If the new row is too large, it deletes the old row and inserts the new one.
 func (hf *HeapFile) Update(id core.RowID, rowBytes []byte) error {
 	pageID, slotIndex := decodeRowID(id)
 
@@ -151,14 +152,27 @@ func (hf *HeapFile) Update(id core.RowID, rowBytes []byte) error {
 		return err
 	}
 
+	// Try Gear 1: In-place update
 	err = page.Update(slotIndex, rowBytes)
-	if err != nil {
+	if err == nil {
+		// Success! It fit perfectly.
+		hf.pool.MarkDirty(pageID)
+		return nil
+	}
+
+	// Try Gear 2: If it didn't fit, we delete and re-insert
+	if err.Error() == "row too large" {
+		// Tombstone the old row
+		if err := hf.Delete(id); err != nil {
+			return err
+		}
+
+		// Insert the new row (this handles finding free space or creating a new page)
+		_, err := hf.Insert(rowBytes)
 		return err
 	}
 
-	// Flag for disk write later
-	hf.pool.MarkDirty(pageID)
-	return nil
+	return err
 }
 
 // Delete removes a row logically in memory.

@@ -209,3 +209,111 @@ func TestParseSelectErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestParseDeleteSuccess(t *testing.T) {
+	// Test 1: Full table delete without WHERE
+	t.Run("Delete All", func(t *testing.T) {
+		stmt, err := Parse("DELETE FROM logs")
+		if err != nil {
+			t.Fatalf("Unexpected delete parse error: %v", err)
+		}
+		del, ok := stmt.(*core.DeleteStmt)
+		if !ok {
+			t.Fatalf("Expected *core.DeleteStmt, got %T", stmt)
+		}
+		if del.Table != "logs" {
+			t.Errorf("Expected table 'logs', got %q", del.Table)
+		}
+		if del.Where != nil {
+			t.Errorf("Expected Where to be nil for unconditional delete")
+		}
+	})
+
+	// Test 2: Filtered delete with Phase 2 table-qualified column reference
+	t.Run("Delete With Condition", func(t *testing.T) {
+		stmt, err := Parse("DELETE FROM users WHERE users.id = 10")
+		if err != nil {
+			t.Fatalf("Unexpected delete parse error: %v", err)
+		}
+		del, ok := stmt.(*core.DeleteStmt)
+		if !ok {
+			t.Fatalf("Expected *core.DeleteStmt")
+		}
+		if del.Table != "users" {
+			t.Errorf("Expected table 'users', got %q", del.Table)
+		}
+
+		// Ensure table-qualification parsed perfectly
+		bin, ok := del.Where.(*core.BinaryExpr)
+		if !ok || bin.Op != core.OpEq {
+			t.Fatalf("Expected equality binary expression condition")
+		}
+		col, ok := bin.Left.(*core.ColumnRef)
+		if !ok || col.Table != "users" || col.Name != "id" {
+			t.Errorf("Expected qualified column reference 'users.id'")
+		}
+	})
+}
+
+func TestParseUpdateSuccess(t *testing.T) {
+	t.Run("Update Multiple Fields with WHERE", func(t *testing.T) {
+		stmt, err := Parse("UPDATE users SET active = false, name = 'updated' WHERE id = 1")
+		if err != nil {
+			t.Fatalf("Unexpected update parse error: %v", err)
+		}
+
+		upd, ok := stmt.(*core.UpdateStmt)
+		if !ok {
+			t.Fatalf("Expected *core.UpdateStmt, got %T", stmt)
+		}
+
+		if upd.Table != "users" {
+			t.Errorf("Expected table 'users', got %q", upd.Table)
+		}
+
+		if len(upd.Set) != 2 {
+			t.Fatalf("Expected 2 assignments, got %d", len(upd.Set))
+		}
+
+		if upd.Set[0].Column != "active" || upd.Set[1].Column != "name" {
+			t.Errorf("Assignments parsed in wrong order or with invalid columns")
+		}
+
+		if upd.Where == nil {
+			t.Errorf("Expected WHERE condition to be populated")
+		}
+	})
+}
+
+func TestParseSelectWithJoinSuccess(t *testing.T) {
+	t.Run("Select with JOIN and Qualified Columns", func(t *testing.T) {
+		query := "SELECT users.name FROM users JOIN orders ON users.id = orders.uid WHERE users.active = true"
+		stmt, err := Parse(query)
+		if err != nil {
+			t.Fatalf("Unexpected JOIN select parse error: %v", err)
+		}
+
+		sel, ok := stmt.(*core.SelectStmt)
+		if !ok {
+			t.Fatalf("Expected *core.SelectStmt, got %T", stmt)
+		}
+
+		if sel.From != "users" {
+			t.Errorf("Expected From table 'users', got %q", sel.From)
+		}
+
+		// Verify Join structure
+		if sel.Join == nil {
+			t.Fatalf("Expected Join field to be populated")
+		}
+		if sel.Join.Table != "orders" {
+			t.Errorf("Expected Join table 'orders', got %q", sel.Join.Table)
+		}
+
+		// Verify ON condition contains binary expression mapping
+		bin, ok := sel.Join.On.(*core.BinaryExpr)
+		if !ok || bin.Op != core.OpEq {
+			t.Errorf("Expected Equality operator in ON clause")
+		}
+	})
+}
