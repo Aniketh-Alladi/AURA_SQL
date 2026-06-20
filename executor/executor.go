@@ -22,6 +22,8 @@ func Execute(eng core.StorageEngine, txn core.Txn, stmt core.Statement) (core.Re
 	switch s := stmt.(type) {
 	case *core.CreateTableStmt:
 		return executeCreateTable(eng, txn, s)
+	case *core.CreateIndexStmt:
+		return executeCreateIndex(eng, txn, s)
 	case *core.InsertStmt:
 		return executeInsert(eng, txn, s)
 	case *core.SelectStmt:
@@ -43,6 +45,13 @@ func executeCreateTable(eng core.StorageEngine, txn core.Txn, stmt *core.CreateT
 	schema := core.Schema{Columns: stmt.Columns}
 	if err := eng.CreateTable(txn, stmt.Table, schema); err != nil {
 		return core.Result{}, fmt.Errorf("create table %q: %w", stmt.Table, err)
+	}
+	return core.Result{}, nil
+}
+
+func executeCreateIndex(eng core.StorageEngine, txn core.Txn, stmt *core.CreateIndexStmt) (core.Result, error) {
+	if err := eng.CreateIndex(txn, stmt.Table, stmt.Column); err != nil {
+		return core.Result{}, fmt.Errorf("create index on %q.%q: %w", stmt.Table, stmt.Column, err)
 	}
 	return core.Result{}, nil
 }
@@ -115,29 +124,23 @@ func executeSelect(eng core.StorageEngine, txn core.Txn, stmt *core.SelectStmt) 
 }
 
 func buildSelectPlan(eng core.StorageEngine, txn core.Txn, stmt *core.SelectStmt) (Operator, error) {
-	// Start with ScanOp for the FROM table
-	scan, err := NewScanOp(eng, txn, stmt.From)
+	root, remainingWhere, err := buildBaseAccessPath(eng, txn, stmt.From, stmt.Where)
 	if err != nil {
 		return nil, err
 	}
-	var root Operator = scan
 
 	// Add JOIN if present
 	if stmt.Join != nil {
-		rightScan, err := NewScanOp(eng, txn, stmt.Join.Table)
+		join, err := buildJoinPlan(eng, txn, root, stmt.Join)
 		if err != nil {
-			return nil, fmt.Errorf("join table %q: %w", stmt.Join.Table, err)
-		}
-		join, err := NewNestedLoopJoinOp(root, rightScan, stmt.Join.On)
-		if err != nil {
-			return nil, fmt.Errorf("create join: %w", err)
+			return nil, err
 		}
 		root = join
 	}
 
 	// Add WHERE filter
-	if stmt.Where != nil {
-		root = NewFilterOp(root, stmt.Where)
+	if remainingWhere != nil {
+		root = NewFilterOp(root, remainingWhere)
 	}
 
 	// Add projection
@@ -148,6 +151,184 @@ func buildSelectPlan(eng core.StorageEngine, txn core.Txn, stmt *core.SelectStmt
 	root = project
 
 	return root, nil
+}
+
+func buildBaseAccessPath(eng core.StorageEngine, txn core.Txn, table string, where core.Expr) (Operator, core.Expr, error) {
+	indexed, remaining := findIndexedEquality(eng, table, where)
+	if indexed != nil {
+		scan, err := NewIndexScanOp(eng, txn, table, indexed.column, indexed.value)
+		if err != nil {
+			return nil, nil, err
+		}
+		return scan, remaining, nil
+	}
+
+	scan, err := NewScanOp(eng, txn, table)
+	if err != nil {
+		return nil, nil, err
+	}
+	return scan, where, nil
+}
+
+func buildJoinPlan(eng core.StorageEngine, txn core.Txn, left Operator, join *core.JoinClause) (Operator, error) {
+	if indexed := indexedJoinEquality(eng, left.Schema(), join.Table, join.On); indexed != nil {
+		joinOp, err := NewIndexedNestedLoopJoinOp(left, eng, txn, join.Table, indexed.rightColumn, indexed.leftColumn, join.On)
+		if err != nil {
+			return nil, fmt.Errorf("create indexed join: %w", err)
+		}
+		return joinOp, nil
+	}
+
+	rightScan, err := NewScanOp(eng, txn, join.Table)
+	if err != nil {
+		return nil, fmt.Errorf("join table %q: %w", join.Table, err)
+	}
+	joinOp, err := NewNestedLoopJoinOp(left, rightScan, join.On)
+	if err != nil {
+		return nil, fmt.Errorf("create join: %w", err)
+	}
+	return joinOp, nil
+}
+
+type indexedEquality struct {
+	column string
+	value  core.Value
+}
+
+func findIndexedEquality(eng core.StorageEngine, table string, where core.Expr) (*indexedEquality, core.Expr) {
+	if where == nil {
+		return nil, nil
+	}
+
+	terms := splitAndTerms(where)
+	for i, term := range terms {
+		equality := equalityColumnLiteral(term, table)
+		if equality == nil || !eng.HasIndex(table, equality.column) {
+			continue
+		}
+
+		remaining := append([]core.Expr{}, terms[:i]...)
+		remaining = append(remaining, terms[i+1:]...)
+		return equality, combineAndTerms(remaining)
+	}
+	return nil, where
+}
+
+func splitAndTerms(expr core.Expr) []core.Expr {
+	binary, ok := expr.(*core.BinaryExpr)
+	if !ok || binary.Op != core.OpAnd {
+		return []core.Expr{expr}
+	}
+
+	terms := splitAndTerms(binary.Left)
+	terms = append(terms, splitAndTerms(binary.Right)...)
+	return terms
+}
+
+func combineAndTerms(terms []core.Expr) core.Expr {
+	if len(terms) == 0 {
+		return nil
+	}
+	combined := terms[0]
+	for _, term := range terms[1:] {
+		combined = &core.BinaryExpr{
+			Op:    core.OpAnd,
+			Left:  combined,
+			Right: term,
+		}
+	}
+	return combined
+}
+
+func equalityColumnLiteral(expr core.Expr, table string) *indexedEquality {
+	binary, ok := expr.(*core.BinaryExpr)
+	if !ok || binary.Op != core.OpEq {
+		return nil
+	}
+
+	if equality := columnLiteral(binary.Left, binary.Right, table); equality != nil {
+		return equality
+	}
+	return columnLiteral(binary.Right, binary.Left, table)
+}
+
+func columnLiteral(left core.Expr, right core.Expr, table string) *indexedEquality {
+	column, ok := left.(*core.ColumnRef)
+	if !ok {
+		return nil
+	}
+	if column.Table != "" && column.Table != table {
+		return nil
+	}
+	literal, ok := right.(*core.Literal)
+	if !ok {
+		return nil
+	}
+	return &indexedEquality{
+		column: column.Name,
+		value:  literal.Value,
+	}
+}
+
+type indexedJoin struct {
+	leftColumn  string
+	rightColumn string
+}
+
+func indexedJoinEquality(eng core.StorageEngine, leftSchema core.Schema, rightTable string, on core.Expr) *indexedJoin {
+	binary, ok := on.(*core.BinaryExpr)
+	if !ok || binary.Op != core.OpEq {
+		return nil
+	}
+
+	rightSchema, ok := eng.GetSchema(rightTable)
+	if !ok {
+		return nil
+	}
+
+	if indexed := joinColumnsForIndex(eng, leftSchema, rightSchema, rightTable, binary.Left, binary.Right); indexed != nil {
+		return indexed
+	}
+	return joinColumnsForIndex(eng, leftSchema, rightSchema, rightTable, binary.Right, binary.Left)
+}
+
+func joinColumnsForIndex(
+	eng core.StorageEngine,
+	leftSchema core.Schema,
+	rightSchema core.Schema,
+	rightTable string,
+	leftExpr core.Expr,
+	rightExpr core.Expr,
+) *indexedJoin {
+	leftColumn, ok := leftExpr.(*core.ColumnRef)
+	if !ok {
+		return nil
+	}
+	rightColumn, ok := rightExpr.(*core.ColumnRef)
+	if !ok {
+		return nil
+	}
+
+	if !columnBelongsToSchema(leftColumn, leftSchema, "") {
+		return nil
+	}
+	if !columnBelongsToSchema(rightColumn, rightSchema, rightTable) {
+		return nil
+	}
+	if !eng.HasIndex(rightTable, rightColumn.Name) {
+		return nil
+	}
+	return &indexedJoin{
+		leftColumn:  leftColumn.Name,
+		rightColumn: rightColumn.Name,
+	}
+}
+
+func columnBelongsToSchema(column *core.ColumnRef, schema core.Schema, table string) bool {
+	if table != "" && column.Table != "" && column.Table != table {
+		return false
+	}
+	return schema.ColumnIndex(column.Name) >= 0
 }
 
 // ============================================================

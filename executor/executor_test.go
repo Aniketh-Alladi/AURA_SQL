@@ -1,10 +1,12 @@
 package executor_test
 
 import (
+	"reflect"
 	"testing"
 
 	"aurasql/core"
 	"aurasql/executor"
+	"aurasql/memstore"
 	"aurasql/storage" // <-- The new power unit
 )
 
@@ -477,8 +479,175 @@ func TestJoinWithWhere(t *testing.T) {
 }
 
 // ============================================================
+// Phase 3: INDEX tests
+// ============================================================
+
+func TestCreateIndex(t *testing.T) {
+	eng := newCountingEngine()
+	tx, _ := eng.Begin()
+	defer tx.Rollback()
+
+	setupUsersTable(t, eng, tx)
+
+	_, err := executor.Execute(eng, tx, &core.CreateIndexStmt{
+		Table:  "users",
+		Column: "id",
+	})
+	if err != nil {
+		t.Fatalf("CreateIndex failed: %v", err)
+	}
+	if !eng.HasIndex("users", "id") {
+		t.Fatal("expected users.id index to exist")
+	}
+}
+
+func TestIndexedSelectUsesSeekIndex(t *testing.T) {
+	eng := newCountingEngine()
+	tx, _ := eng.Begin()
+	defer tx.Rollback()
+
+	setupUsersTable(t, eng, tx)
+	_, err := executor.Execute(eng, tx, &core.CreateIndexStmt{Table: "users", Column: "id"})
+	if err != nil {
+		t.Fatalf("CreateIndex failed: %v", err)
+	}
+
+	result, err := executor.Execute(eng, tx, &core.SelectStmt{
+		Projection: []core.Expr{&core.Star{}},
+		From:       "users",
+		Where: &core.BinaryExpr{
+			Op:    core.OpEq,
+			Left:  &core.ColumnRef{Name: "id"},
+			Right: &core.Literal{Value: core.NewInt(2)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("indexed select failed: %v", err)
+	}
+	if eng.seekCount == 0 {
+		t.Fatal("expected indexed select to call SeekIndex")
+	}
+	if len(result.Rows) != 1 || result.Rows[0].Values[1].Str != "bob" {
+		t.Fatalf("unexpected indexed select result: %+v", result.Rows)
+	}
+}
+
+func TestFallbackSelectDoesNotUseSeekIndex(t *testing.T) {
+	eng := newCountingEngine()
+	tx, _ := eng.Begin()
+	defer tx.Rollback()
+
+	setupUsersTable(t, eng, tx)
+
+	result, err := executor.Execute(eng, tx, &core.SelectStmt{
+		Projection: []core.Expr{&core.Star{}},
+		From:       "users",
+		Where: &core.BinaryExpr{
+			Op:    core.OpEq,
+			Left:  &core.ColumnRef{Name: "id"},
+			Right: &core.Literal{Value: core.NewInt(2)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("fallback select failed: %v", err)
+	}
+	if eng.seekCount != 0 {
+		t.Fatalf("expected fallback select not to call SeekIndex, got %d calls", eng.seekCount)
+	}
+	if len(result.Rows) != 1 || result.Rows[0].Values[1].Str != "bob" {
+		t.Fatalf("unexpected fallback select result: %+v", result.Rows)
+	}
+}
+
+func TestIndexedJoinUsesSeekIndex(t *testing.T) {
+	eng := newCountingEngine()
+	tx, _ := eng.Begin()
+	defer tx.Rollback()
+
+	setupUsersTable(t, eng, tx)
+	setupOrdersTable(t, eng, tx)
+	_, err := executor.Execute(eng, tx, &core.CreateIndexStmt{Table: "orders", Column: "user_id"})
+	if err != nil {
+		t.Fatalf("CreateIndex failed: %v", err)
+	}
+
+	result, err := executor.Execute(eng, tx, usersOrdersJoinStmt())
+	if err != nil {
+		t.Fatalf("indexed join failed: %v", err)
+	}
+	if eng.seekCount == 0 {
+		t.Fatal("expected indexed join to call SeekIndex")
+	}
+	if len(result.Rows) != 3 {
+		t.Fatalf("expected 3 joined rows, got %d", len(result.Rows))
+	}
+}
+
+func TestIndexedAndNonIndexedResultEquivalence(t *testing.T) {
+	indexed := newCountingEngine()
+	indexedTx, _ := indexed.Begin()
+	defer indexedTx.Rollback()
+	setupUsersTable(t, indexed, indexedTx)
+	_, err := executor.Execute(indexed, indexedTx, &core.CreateIndexStmt{Table: "users", Column: "id"})
+	if err != nil {
+		t.Fatalf("CreateIndex failed: %v", err)
+	}
+
+	plain := newCountingEngine()
+	plainTx, _ := plain.Begin()
+	defer plainTx.Rollback()
+	setupUsersTable(t, plain, plainTx)
+
+	stmt := &core.SelectStmt{
+		Projection: []core.Expr{
+			&core.ColumnRef{Name: "id"},
+			&core.ColumnRef{Name: "name"},
+		},
+		From: "users",
+		Where: &core.BinaryExpr{
+			Op:    core.OpEq,
+			Left:  &core.ColumnRef{Name: "id"},
+			Right: &core.Literal{Value: core.NewInt(2)},
+		},
+	}
+
+	indexedResult, err := executor.Execute(indexed, indexedTx, stmt)
+	if err != nil {
+		t.Fatalf("indexed select failed: %v", err)
+	}
+	plainResult, err := executor.Execute(plain, plainTx, stmt)
+	if err != nil {
+		t.Fatalf("plain select failed: %v", err)
+	}
+
+	if !reflect.DeepEqual(indexedResult, plainResult) {
+		t.Fatalf("indexed result = %+v, plain result = %+v", indexedResult, plainResult)
+	}
+	if indexed.seekCount == 0 {
+		t.Fatal("expected indexed path to use SeekIndex")
+	}
+	if plain.seekCount != 0 {
+		t.Fatalf("expected non-indexed path not to use SeekIndex, got %d calls", plain.seekCount)
+	}
+}
+
+// ============================================================
 // Test helpers
 // ============================================================
+
+type countingEngine struct {
+	core.StorageEngine
+	seekCount int
+}
+
+func newCountingEngine() *countingEngine {
+	return &countingEngine{StorageEngine: memstore.New()}
+}
+
+func (e *countingEngine) SeekIndex(txn core.Txn, table, column string, key core.Value) (core.RowIterator, error) {
+	e.seekCount++
+	return e.StorageEngine.SeekIndex(txn, table, column, key)
+}
 
 func setupUsersTable(t *testing.T, eng core.StorageEngine, txn core.Txn) {
 	t.Helper()
@@ -514,4 +683,53 @@ func setupUsersTable(t *testing.T, eng core.StorageEngine, txn core.Txn) {
 			&core.Literal{Value: core.NewBool(true)},
 		},
 	})
+}
+
+func setupOrdersTable(t *testing.T, eng core.StorageEngine, txn core.Txn) {
+	t.Helper()
+	executor.Execute(eng, txn, &core.CreateTableStmt{
+		Table: "orders",
+		Columns: []core.Column{
+			{Name: "order_id", Type: core.TypeInt},
+			{Name: "user_id", Type: core.TypeInt},
+			{Name: "product", Type: core.TypeText},
+		},
+	})
+	orders := []struct {
+		id      int64
+		userID  int64
+		product string
+	}{
+		{id: 101, userID: 1, product: "laptop"},
+		{id: 102, userID: 1, product: "phone"},
+		{id: 103, userID: 2, product: "tablet"},
+	}
+	for _, order := range orders {
+		executor.Execute(eng, txn, &core.InsertStmt{
+			Table: "orders",
+			Values: []core.Expr{
+				&core.Literal{Value: core.NewInt(order.id)},
+				&core.Literal{Value: core.NewInt(order.userID)},
+				&core.Literal{Value: core.NewText(order.product)},
+			},
+		})
+	}
+}
+
+func usersOrdersJoinStmt() *core.SelectStmt {
+	return &core.SelectStmt{
+		Projection: []core.Expr{
+			&core.ColumnRef{Name: "name"},
+			&core.ColumnRef{Name: "product"},
+		},
+		From: "users",
+		Join: &core.JoinClause{
+			Table: "orders",
+			On: &core.BinaryExpr{
+				Op:    core.OpEq,
+				Left:  &core.ColumnRef{Name: "id"},
+				Right: &core.ColumnRef{Name: "user_id"},
+			},
+		},
+	}
 }

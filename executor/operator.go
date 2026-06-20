@@ -94,6 +94,37 @@ func NewScanOp(eng core.StorageEngine, txn core.Txn, table string) (*ScanOp, err
 	}, nil
 }
 
+// NewIndexScanOp creates a ScanOp backed by an index seek.
+func NewIndexScanOp(eng core.StorageEngine, txn core.Txn, table, column string, key core.Value) (*ScanOp, error) {
+	schema, ok := eng.GetSchema(table)
+	if !ok {
+		return nil, fmt.Errorf("table %q does not exist", table)
+	}
+	iter, err := eng.SeekIndex(txn, table, column, key)
+	if err != nil {
+		return nil, fmt.Errorf("seek index %q.%q: %w", table, column, err)
+	}
+
+	qualified := QualifiedSchema{
+		Columns: make([]QualifiedColumn, len(schema.Columns)),
+	}
+	for i, col := range schema.Columns {
+		qualified.Columns[i] = QualifiedColumn{
+			Table: table,
+			Name:  col.Name,
+			Type:  col.Type,
+		}
+	}
+
+	return &ScanOp{
+		txn:    txn,
+		table:  table,
+		iter:   iter,
+		schema: qualified,
+		closed: false,
+	}, nil
+}
+
 func (s *ScanOp) Next() (core.Row, bool, error) {
 	if s.closed {
 		return core.Row{}, false, fmt.Errorf("scan is closed")
