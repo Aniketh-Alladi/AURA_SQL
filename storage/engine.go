@@ -179,7 +179,7 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 			return 0, core.Row{}, false, err
 		}
 
-		// Assuming you have an endian variable defined elsewhere in your package, 
+		// Assuming you have an endian variable defined elsewhere in your package,
 		// otherwise you might need to use binary.LittleEndian here.
 		// Example: binary.LittleEndian.Uint16(...)
 		slotCount := int(page.Data[0]) | int(page.Data[1])<<8 // simplified example of endian logic
@@ -199,7 +199,7 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 
 			dataOffset := int(page.Data[slotOffset]) | int(page.Data[slotOffset+1])<<8
 			rawRow := page.Data[dataOffset : dataOffset+length]
-			
+
 			// Assuming Deserialize is defined elsewhere in your package
 			return id, Deserialize(rawRow), true, nil
 		}

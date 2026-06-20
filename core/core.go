@@ -57,9 +57,9 @@ type Value struct {
 	Null bool
 }
 
-func NewInt(v int64) Value        { return Value{Type: TypeInt, Int: v} }
-func NewText(v string) Value      { return Value{Type: TypeText, Str: v} }
-func NewBool(v bool) Value        { return Value{Type: TypeBool, Bool: v} }
+func NewInt(v int64) Value         { return Value{Type: TypeInt, Int: v} }
+func NewText(v string) Value       { return Value{Type: TypeText, Str: v} }
+func NewBool(v bool) Value         { return Value{Type: TypeBool, Bool: v} }
 func NullValue(t ColumnType) Value { return Value{Type: t, Null: true} }
 
 func (v Value) String() string {
