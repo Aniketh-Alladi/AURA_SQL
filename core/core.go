@@ -187,6 +187,11 @@ type StorageEngine interface {
 
 	// Scan iterates the rows of a table that are visible to txn.
 	Scan(txn Txn, table string) (RowIterator, error)
+
+	// Phase 3: Indexing
+	CreateIndex(txn Txn, table, column string) error
+	HasIndex(table, column string) bool
+	SeekIndex(txn Txn, table, column string, key Value) (RowIterator, error)
 }
 
 // ============================================================
@@ -201,6 +206,13 @@ type Statement interface{ isStatement() }
 type CreateTableStmt struct {
 	Table   string
 	Columns []Column
+}
+
+// CreateIndexStmt: CREATE INDEX [Name] ON <Table> (<Column>).
+type CreateIndexStmt struct {
+	Name   string // optional index name; "" means auto (e.g. idx_table_col)
+	Table  string
+	Column string
 }
 
 // InsertStmt: INSERT INTO <Table> VALUES (<Values...>).
@@ -245,6 +257,7 @@ type DeleteStmt struct {
 }
 
 func (*CreateTableStmt) isStatement() {}
+func (*CreateIndexStmt) isStatement() {}
 func (*InsertStmt) isStatement()      {}
 func (*SelectStmt) isStatement()      {}
 func (*UpdateStmt) isStatement()      {}
