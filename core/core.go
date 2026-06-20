@@ -208,9 +208,9 @@ type CreateTableStmt struct {
 	Columns []Column
 }
 
-// CreateIndexStmt: CREATE INDEX [Name] ON <Table> (<Column>).
+// CreateIndexStmt represents a 'CREATE INDEX' statement.
 type CreateIndexStmt struct {
-	Name   string // optional index name; "" means auto (e.g. idx_table_col)
+	Name   string // Optional index name; "" means auto-generated (e.g., idx_table_col)
 	Table  string
 	Column string
 }

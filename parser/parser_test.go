@@ -317,3 +317,35 @@ func TestParseSelectWithJoinSuccess(t *testing.T) {
 		}
 	})
 }
+
+func TestParseCreateIndexSuccess(t *testing.T) {
+	// 1. Test unnamed auto-generated index format
+	t.Run("Unnamed Index", func(t *testing.T) {
+		stmt, err := Parse("CREATE INDEX ON users(id)")
+		if err != nil {
+			t.Fatalf("Unexpected error parsing unnamed index: %v", err)
+		}
+		ci, ok := stmt.(*core.CreateIndexStmt)
+		if !ok {
+			t.Fatalf("Expected *core.CreateIndexStmt, got %T", stmt)
+		}
+		if ci.Table != "users" || ci.Column != "id" || ci.Name != "" {
+			t.Errorf("Mismatch in parsed unnamed index values: %+v", ci)
+		}
+	})
+
+	// 2. Test explicitly named index format
+	t.Run("Named Index", func(t *testing.T) {
+		stmt, err := Parse("CREATE INDEX idx_users_id ON users(id)")
+		if err != nil {
+			t.Fatalf("Unexpected error parsing named index: %v", err)
+		}
+		ci, ok := stmt.(*core.CreateIndexStmt)
+		if !ok {
+			t.Fatalf("Expected *core.CreateIndexStmt")
+		}
+		if ci.Name != "idx_users_id" || ci.Table != "users" || ci.Column != "id" {
+			t.Errorf("Mismatch in parsed named index values: %+v", ci)
+		}
+	})
+}

@@ -42,6 +42,10 @@ func (p *Parser) parseStatement() (core.Statement, error) {
 
 	switch p.currTok.Type {
 	case TokenCreate:
+		// Look ahead: is the next token INDEX?
+		if p.peekTok.Type == TokenIndex {
+			return p.parseCreateIndex()
+		}
 		return p.parseCreateTable()
 	case TokenInsert:
 		return p.parseInsert()
@@ -521,5 +525,58 @@ func (p *Parser) parseUpdate() (core.Statement, error) {
 		Table: tableName,
 		Set:   assignments,
 		Where: whereExpr,
+	}, nil
+}
+
+// parseCreateIndex handles: CREATE INDEX [name] ON table(column)
+func (p *Parser) parseCreateIndex() (core.Statement, error) {
+	p.nextToken() // consume CREATE
+	p.nextToken() // consume INDEX
+
+	var indexName string
+	// If the next token isn't ON, it must be the optional index name
+	if p.currTok.Type != TokenOn {
+		if p.currTok.Type != TokenIdentifier {
+			return nil, fmt.Errorf("expected index name or ON keyword, got %q", p.currTok.Value)
+		}
+		indexName = p.currTok.Value
+		p.nextToken() // consume index name
+	}
+
+	if p.currTok.Type != TokenOn {
+		return nil, fmt.Errorf("expected ON keyword, got %q", p.currTok.Value)
+	}
+	p.nextToken() // consume ON
+
+	if p.currTok.Type != TokenIdentifier {
+		return nil, fmt.Errorf("expected table name, got %q", p.currTok.Value)
+	}
+	tableName := p.currTok.Value
+	p.nextToken() // consume table name
+
+	if p.currTok.Type != TokenOpenParen {
+		return nil, fmt.Errorf("expected '(' before column name, got %q", p.currTok.Value)
+	}
+	p.nextToken() // consume '('
+
+	if p.currTok.Type != TokenIdentifier {
+		return nil, fmt.Errorf("expected column identifier, got %q", p.currTok.Value)
+	}
+	columnName := p.currTok.Value
+	p.nextToken() // consume column identifier
+
+	if p.currTok.Type != TokenCloseParen {
+		return nil, fmt.Errorf("expected ')' after column name, got %q", p.currTok.Value)
+	}
+	p.nextToken() // consume ')'
+
+	if p.currTok.Type != TokenEOF {
+		return nil, fmt.Errorf("unexpected tokens after CREATE INDEX statement: %q", p.currTok.Value)
+	}
+
+	return &core.CreateIndexStmt{
+		Name:   indexName,
+		Table:  tableName,
+		Column: columnName,
 	}, nil
 }
