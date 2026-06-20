@@ -67,7 +67,7 @@ func (c *Catalog) DropTable(name string) error {
 type diskMetadata struct {
 	Name       string         `json:"name"`
 	Schema     core.Schema    `json:"schema"`
-	IndexRoots map[string]int `json:"index_roots"` // Make sure JSON saves our index roots
+	IndexRoots map[string]int `json:"index_roots"`
 }
 
 // Save writes the current catalog state to a JSON file.
@@ -77,10 +77,15 @@ func (c *Catalog) Save(dataDir string) error {
 	// Extract just the data we need to save
 	var serializable []diskMetadata
 	for _, meta := range c.tables {
+		// Make sure IndexRoots is not nil
+		indexRoots := meta.IndexRoots
+		if indexRoots == nil {
+			indexRoots = make(map[string]int)
+		}
 		serializable = append(serializable, diskMetadata{
 			Name:       meta.Name,
 			Schema:     meta.Schema,
-			IndexRoots: meta.IndexRoots, // Save the map
+			IndexRoots: indexRoots,
 		})
 	}
 
@@ -123,7 +128,7 @@ func (c *Catalog) Load(dataDir string) error {
 		pool := NewBufferPool(hf, 100)
 		hf.SetBufferPool(pool)
 
-		// Make sure map isn't nil if an old save file didn't have it
+		// Make sure map isn't nil
 		indexRoots := item.IndexRoots
 		if indexRoots == nil {
 			indexRoots = make(map[string]int)
@@ -134,7 +139,7 @@ func (c *Catalog) Load(dataDir string) error {
 			Name:       item.Name,
 			Schema:     item.Schema,
 			HeapFile:   hf,
-			IndexRoots: indexRoots, // Restore the map
+			IndexRoots: indexRoots,
 		}
 	}
 

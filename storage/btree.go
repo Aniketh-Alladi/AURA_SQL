@@ -115,6 +115,11 @@ func (e *Engine) writeNode(node *BTreeNode) error {
 		binary.LittleEndian.PutUint64(data[offset:offset+8], node.Pointers[node.NumKeys])
 	}
 
+	// FIX 2: Mark this index page dirty so FlushAll() persists it to disk on Close.
+	// Without this, modified index pages live only in the buffer pool and are lost
+	// on restart, since FlushAll only writes pages that are in the dirty set.
+	e.indexPool.MarkDirty(node.PageID)
+
 	return nil
 }
 
@@ -248,8 +253,8 @@ func (e *Engine) fetchRowByID(table string, id core.RowID) (core.Row, error) {
 		return core.Row{}, fmt.Errorf("table %s not found", table)
 	}
 
-	pageID := int(uint64(id) >> 32)
-	slotID := int(uint64(id) & 0xFFFFFFFF)
+	// Use the same decoding as decodeRowID from heapfile.go
+	pageID, slotID := decodeRowID(id)
 
 	page, err := meta.HeapFile.pool.FetchPage(pageID)
 	if err != nil {
@@ -257,11 +262,22 @@ func (e *Engine) fetchRowByID(table string, id core.RowID) (core.Row, error) {
 	}
 
 	slotOffset := 4 + (slotID * 4)
+
+	// Check if the page is large enough
+	if len(page.Data) < slotOffset+4 {
+		return core.Row{}, fmt.Errorf("slot %d out of bounds", slotID)
+	}
+
 	dataOffset := int(page.Data[slotOffset]) | int(page.Data[slotOffset+1])<<8
 	length := int(page.Data[slotOffset+2]) | int(page.Data[slotOffset+3])<<8
 
 	if length == 0 {
 		return core.Row{}, fmt.Errorf("row %d has been deleted", id)
+	}
+
+	// Check bounds
+	if dataOffset+length > len(page.Data) {
+		return core.Row{}, fmt.Errorf("row data out of bounds")
 	}
 
 	rawRow := page.Data[dataOffset : dataOffset+length]

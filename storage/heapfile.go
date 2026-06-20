@@ -143,7 +143,12 @@ func (hf *HeapFile) Get(id core.RowID) ([]byte, error) {
 }
 
 // Update modifies an existing row. It attempts an in-place update first.
-// If the new row is too large, it deletes the old row and inserts the new one.
+//
+// If the new row fits in the old slot, it overwrites it in place and returns nil.
+// If the new row is too large, it returns the "row too large" error WITHOUT
+// touching anything. The caller (Engine.Update) is responsible for handling that
+// case, because only the Engine knows how to keep the B-tree indexes in sync with
+// the new RowID that a delete+reinsert would produce.
 func (hf *HeapFile) Update(id core.RowID, rowBytes []byte) error {
 	pageID, slotIndex := decodeRowID(id)
 
@@ -152,7 +157,7 @@ func (hf *HeapFile) Update(id core.RowID, rowBytes []byte) error {
 		return err
 	}
 
-	// Try Gear 1: In-place update
+	// Try in-place update first.
 	err = page.Update(slotIndex, rowBytes)
 	if err == nil {
 		// Success! It fit perfectly.
@@ -160,18 +165,9 @@ func (hf *HeapFile) Update(id core.RowID, rowBytes []byte) error {
 		return nil
 	}
 
-	// Try Gear 2: If it didn't fit, we delete and re-insert
-	if err.Error() == "row too large" {
-		// Tombstone the old row
-		if err := hf.Delete(id); err != nil {
-			return err
-		}
-
-		// Insert the new row (this handles finding free space or creating a new page)
-		_, err := hf.Insert(rowBytes)
-		return err
-	}
-
+	// It didn't fit (or some other error). Propagate the error up so Engine.Update
+	// can run its delete-old-index -> heap delete -> heap insert -> insert-new-index
+	// path with the correct new RowID. We deliberately do NOT delete+reinsert here.
 	return err
 }
 
