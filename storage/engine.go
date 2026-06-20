@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -178,12 +179,16 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 			return 0, core.Row{}, false, err
 		}
 
-		slotCount := int(endian.Uint16(page.Data[0:2]))
+		// Assuming you have an endian variable defined elsewhere in your package, 
+		// otherwise you might need to use binary.LittleEndian here.
+		// Example: binary.LittleEndian.Uint16(...)
+		slotCount := int(page.Data[0]) | int(page.Data[1])<<8 // simplified example of endian logic
 
 		for it.currSlot < slotCount {
 			slotOffset := 4 + (it.currSlot * 4)
-			length := int(endian.Uint16(page.Data[slotOffset+2 : slotOffset+4]))
+			length := int(page.Data[slotOffset+2]) | int(page.Data[slotOffset+3])<<8
 
+			// Assuming encodeRowID is defined elsewhere in your package
 			id := encodeRowID(it.currPage, it.currSlot)
 			it.currSlot++
 
@@ -192,8 +197,10 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 				continue
 			}
 
-			dataOffset := int(endian.Uint16(page.Data[slotOffset : slotOffset+2]))
+			dataOffset := int(page.Data[slotOffset]) | int(page.Data[slotOffset+1])<<8
 			rawRow := page.Data[dataOffset : dataOffset+length]
+			
+			// Assuming Deserialize is defined elsewhere in your package
 			return id, Deserialize(rawRow), true, nil
 		}
 
@@ -221,4 +228,23 @@ func (e *Engine) Close() error {
 // Close cleanly shuts down the iterator.
 func (it *heapFileIterator) Close() error {
 	return nil // We don't have any active file locks tied to the iterator itself right now
+}
+
+// ==========================================
+// 4. Indexing (Phase 3 Stubs)
+// ==========================================
+
+func (e *Engine) CreateIndex(txn core.Txn, table, column string) error {
+	// TODO: Phase 3 - Implement B+-Tree initialization
+	return nil
+}
+
+func (e *Engine) HasIndex(table, column string) bool {
+	// TODO: Phase 3 - Check catalog for B+-Tree existence
+	return false
+}
+
+func (e *Engine) SeekIndex(txn core.Txn, table, column string, key core.Value) (core.RowIterator, error) {
+	// TODO: Phase 3 - Implement B+-Tree search
+	return nil, fmt.Errorf("SeekIndex not yet implemented in real storage")
 }

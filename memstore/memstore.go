@@ -25,15 +25,19 @@ type table struct {
 
 // Engine is an in-memory StorageEngine. Create one with New.
 type Engine struct {
-	mu     sync.Mutex
-	tables map[string]*table
-	nextID core.RowID
-	nextTx uint64
+	mu      sync.Mutex
+	tables  map[string]*table
+	indexes map[string]bool // Added for Phase 3
+	nextID  core.RowID
+	nextTx  uint64
 }
 
 // New returns an empty in-memory engine.
 func New() *Engine {
-	return &Engine{tables: make(map[string]*table)}
+	return &Engine{
+		tables:  make(map[string]*table),
+		indexes: make(map[string]bool),
+	}
 }
 
 type txn struct{ id uint64 }
@@ -151,4 +155,75 @@ func (e *Engine) Scan(_ core.Txn, name string) (core.RowIterator, error) {
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return &iterator{ids: ids, rows: rowsCopy}, nil
+}
+
+// ============================================================
+// Phase 3: Indexing Stand-ins
+// ============================================================
+
+func (e *Engine) CreateIndex(_ core.Txn, table, column string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	indexKey := table + ":" + column
+	e.indexes[indexKey] = true
+	return nil
+}
+
+func (e *Engine) HasIndex(table, column string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	indexKey := table + ":" + column
+	return e.indexes[indexKey]
+}
+
+func (e *Engine) SeekIndex(txn core.Txn, table, column string, key core.Value) (core.RowIterator, error) {
+	schema, ok := e.GetSchema(table)
+	if !ok {
+		return nil, fmt.Errorf("table %q does not exist", table)
+	}
+
+	colIdx := schema.ColumnIndex(column)
+	if colIdx < 0 {
+		return nil, fmt.Errorf("column %q not found in table %q", column, table)
+	}
+
+	// Rely on the existing scan to get all rows
+	iter, err := e.Scan(txn, table)
+	if err != nil {
+		return nil, err
+	}
+
+	return &memstoreIndexIterator{
+		base:      iter,
+		colIdx:    colIdx,
+		targetKey: key,
+	}, nil
+}
+
+// memstoreIndexIterator filters a full table scan down to matching keys.
+type memstoreIndexIterator struct {
+	base      core.RowIterator
+	colIdx    int
+	targetKey core.Value
+}
+
+func (it *memstoreIndexIterator) Next() (core.RowID, core.Row, bool, error) {
+	for {
+		id, row, ok, err := it.base.Next()
+		if !ok || err != nil {
+			return 0, core.Row{}, false, err
+		}
+
+		val := row.Values[it.colIdx]
+		cmp, err := val.Compare(it.targetKey)
+
+		// If the values match perfectly, yield the row
+		if err == nil && cmp == 0 {
+			return id, row, true, nil
+		}
+	}
+}
+
+func (it *memstoreIndexIterator) Close() error {
+	return it.base.Close()
 }
