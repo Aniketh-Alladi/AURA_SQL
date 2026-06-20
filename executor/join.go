@@ -97,6 +97,116 @@ func (j *NestedLoopJoinOp) materializeRight() error {
 	return nil
 }
 
+// IndexedNestedLoopJoinOp probes an index on the right table for each left row.
+type IndexedNestedLoopJoinOp struct {
+	left        Operator
+	eng         core.StorageEngine
+	txn         core.Txn
+	rightTable  string
+	rightColumn string
+	leftColumn  string
+	on          core.Expr
+	leftSchema  core.Schema
+	rightSchema core.Schema
+	schema      core.Schema
+	leftRow     core.Row
+	rightIter   core.RowIterator
+}
+
+func NewIndexedNestedLoopJoinOp(
+	left Operator,
+	eng core.StorageEngine,
+	txn core.Txn,
+	rightTable string,
+	rightColumn string,
+	leftColumn string,
+	on core.Expr,
+) (*IndexedNestedLoopJoinOp, error) {
+	rightSchema, ok := eng.GetSchema(rightTable)
+	if !ok {
+		return nil, fmt.Errorf("table %q does not exist", rightTable)
+	}
+
+	leftSchema := left.Schema()
+	cols := make([]core.Column, 0, len(leftSchema.Columns)+len(rightSchema.Columns))
+	cols = append(cols, leftSchema.Columns...)
+	cols = append(cols, rightSchema.Columns...)
+
+	return &IndexedNestedLoopJoinOp{
+		left:        left,
+		eng:         eng,
+		txn:         txn,
+		rightTable:  rightTable,
+		rightColumn: rightColumn,
+		leftColumn:  leftColumn,
+		on:          on,
+		leftSchema:  leftSchema,
+		rightSchema: rightSchema,
+		schema:      core.Schema{Columns: cols},
+	}, nil
+}
+
+func (j *IndexedNestedLoopJoinOp) Next() (core.Row, bool, error) {
+	for {
+		if j.rightIter == nil {
+			leftRow, ok, err := j.left.Next()
+			if err != nil {
+				return core.Row{}, false, fmt.Errorf("left next: %w", err)
+			}
+			if !ok {
+				return core.Row{}, false, nil
+			}
+			key, err := eval(&core.ColumnRef{Name: j.leftColumn}, leftRow, j.leftSchema)
+			if err != nil {
+				return core.Row{}, false, fmt.Errorf("left key: %w", err)
+			}
+			iter, err := j.eng.SeekIndex(j.txn, j.rightTable, j.rightColumn, key)
+			if err != nil {
+				return core.Row{}, false, fmt.Errorf("seek right index %q.%q: %w", j.rightTable, j.rightColumn, err)
+			}
+			j.leftRow = leftRow
+			j.rightIter = iter
+		}
+
+		_, rightRow, ok, err := j.rightIter.Next()
+		if err != nil {
+			return core.Row{}, false, fmt.Errorf("right index next: %w", err)
+		}
+		if !ok {
+			if err := j.rightIter.Close(); err != nil {
+				return core.Row{}, false, fmt.Errorf("close right index: %w", err)
+			}
+			j.rightIter = nil
+			continue
+		}
+
+		combined := core.Row{
+			Values: append(append([]core.Value{}, j.leftRow.Values...), rightRow.Values...),
+		}
+		matches, err := evalWhere(j.on, combined, j.schema)
+		if err != nil {
+			return core.Row{}, false, fmt.Errorf("join condition: %w", err)
+		}
+		if matches {
+			return combined, true, nil
+		}
+	}
+}
+
+func (j *IndexedNestedLoopJoinOp) Schema() core.Schema {
+	return j.schema
+}
+
+func (j *IndexedNestedLoopJoinOp) Close() error {
+	if j.rightIter != nil {
+		if err := j.rightIter.Close(); err != nil {
+			return fmt.Errorf("close right index: %w", err)
+		}
+		j.rightIter = nil
+	}
+	return j.left.Close()
+}
+
 func (j *NestedLoopJoinOp) Schema() core.Schema {
 	return j.schema
 }
