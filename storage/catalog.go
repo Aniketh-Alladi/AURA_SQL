@@ -11,9 +11,10 @@ import (
 
 // TableMetadata holds everything the system needs to know about a single table.
 type TableMetadata struct {
-	Name     string
-	Schema   core.Schema
-	HeapFile *HeapFile
+	Name       string
+	Schema     core.Schema
+	HeapFile   *HeapFile
+	IndexRoots map[string]int // Tracks our B-Tree Root Pages
 }
 
 // Catalog tracks all tables currently existing in the database.
@@ -35,9 +36,10 @@ func (c *Catalog) AddTable(name string, schema core.Schema, hf *HeapFile) error 
 	}
 
 	c.tables[name] = &TableMetadata{
-		Name:     name,
-		Schema:   schema,
-		HeapFile: hf,
+		Name:       name,
+		Schema:     schema,
+		HeapFile:   hf,
+		IndexRoots: make(map[string]int), // Initialize the empty map
 	}
 	return nil
 }
@@ -63,8 +65,9 @@ func (c *Catalog) DropTable(name string) error {
 
 // diskMetadata is a simplified struct just for JSON serialization
 type diskMetadata struct {
-	Name   string      `json:"name"`
-	Schema core.Schema `json:"schema"`
+	Name       string         `json:"name"`
+	Schema     core.Schema    `json:"schema"`
+	IndexRoots map[string]int `json:"index_roots"` // Make sure JSON saves our index roots
 }
 
 // Save writes the current catalog state to a JSON file.
@@ -75,8 +78,9 @@ func (c *Catalog) Save(dataDir string) error {
 	var serializable []diskMetadata
 	for _, meta := range c.tables {
 		serializable = append(serializable, diskMetadata{
-			Name:   meta.Name,
-			Schema: meta.Schema,
+			Name:       meta.Name,
+			Schema:     meta.Schema,
+			IndexRoots: meta.IndexRoots, // Save the map
 		})
 	}
 
@@ -119,11 +123,18 @@ func (c *Catalog) Load(dataDir string) error {
 		pool := NewBufferPool(hf, 100)
 		hf.SetBufferPool(pool)
 
+		// Make sure map isn't nil if an old save file didn't have it
+		indexRoots := item.IndexRoots
+		if indexRoots == nil {
+			indexRoots = make(map[string]int)
+		}
+
 		// Put it back in the memory map
 		c.tables[item.Name] = &TableMetadata{
-			Name:     item.Name,
-			Schema:   item.Schema,
-			HeapFile: hf,
+			Name:       item.Name,
+			Schema:     item.Schema,
+			HeapFile:   hf,
+			IndexRoots: indexRoots, // Restore the map
 		}
 	}
 

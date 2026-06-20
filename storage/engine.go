@@ -26,10 +26,12 @@ func (t *txn) Rollback() error { return nil } // No-op
 
 // Engine is the disk-backed implementation of core.StorageEngine.
 type Engine struct {
-	mu      sync.Mutex // Ensures thread safety for catalog operations
-	catalog *Catalog
-	dataDir string // The folder where heap files are saved
-	nextTx  uint64
+	mu        sync.Mutex
+	catalog   *Catalog
+	dataDir   string
+	nextTx    uint64
+	indexFile *HeapFile   // Added: Physical file for all B-Tree pages
+	indexPool *BufferPool // Added: RAM manager for B-Tree pages
 }
 
 // New creates a new StorageEngine saving data to the specified directory.
@@ -44,11 +46,25 @@ func New(dataDir string) (*Engine, error) {
 		return nil, err
 	}
 
+	// Spin up the dedicated file and Buffer Pool for our B-Tree Indexes
+	indexPath := filepath.Join(dataDir, "indexes.db")
+	idxFile, err := NewHeapFile(indexPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create a buffer pool specifically for indexes (e.g., 100 pages)
+	idxPool := NewBufferPool(idxFile, 100)
+	idxFile.SetBufferPool(idxPool)
+
 	return &Engine{
-		catalog: cat,
-		dataDir: dataDir,
+		catalog:   cat,
+		dataDir:   dataDir,
+		indexFile: idxFile,
+		indexPool: idxPool,
 	}, nil
 }
+
 func (e *Engine) Begin() (core.Txn, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -125,7 +141,34 @@ func (e *Engine) Insert(_ core.Txn, table string, row core.Row) (core.RowID, err
 	if err != nil {
 		return 0, err
 	}
-	return meta.HeapFile.Insert(Serialize(row))
+
+	// 1. Insert the raw row into the physical HeapFile and get its new RowID
+	id, err := meta.HeapFile.Insert(Serialize(row))
+	if err != nil {
+		return 0, err
+	}
+
+	// 2. Automatically update any existing B-Tree indexes for this table
+	for colIdx, col := range meta.Schema.Columns {
+		// Check if this specific column has an active B-Tree index
+		if _, hasIndex := meta.IndexRoots[col.Name]; hasIndex {
+			// Grab the specific value for this column from the inserted row
+			val := row.Values[colIdx]
+
+			// For Phase 3, we skip indexing NULL values to keep the math clean
+			if val.Null {
+				continue
+			}
+
+			// Insert the key and the new RowID straight into the B-Tree
+			err := e.InsertIntoIndex(table, col.Name, val, id)
+			if err != nil {
+				return 0, fmt.Errorf("failed to update index on %s.%s: %w", table, col.Name, err)
+			}
+		}
+	}
+
+	return id, nil
 }
 
 func (e *Engine) Update(_ core.Txn, table string, id core.RowID, row core.Row) error {
@@ -218,10 +261,18 @@ func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// Flush and close all table files
 	for _, meta := range e.catalog.tables {
 		meta.HeapFile.pool.FlushAll()
 		meta.HeapFile.Close()
 	}
+
+	// Flush and close the index file
+	if e.indexPool != nil {
+		e.indexPool.FlushAll()
+		e.indexFile.Close()
+	}
+
 	return nil
 }
 
@@ -231,20 +282,55 @@ func (it *heapFileIterator) Close() error {
 }
 
 // ==========================================
-// 4. Indexing (Phase 3 Stubs)
+// 4. Indexing (Phase 3)
 // ==========================================
 
-func (e *Engine) CreateIndex(txn core.Txn, table, column string) error {
-	// TODO: Phase 3 - Implement B+-Tree initialization
-	return nil
-}
-
 func (e *Engine) HasIndex(table, column string) bool {
-	// TODO: Phase 3 - Check catalog for B+-Tree existence
-	return false
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	meta, err := e.catalog.GetTable(table)
+	if err != nil {
+		return false
+	}
+
+	// Check if this column exists in our IndexRoots map
+	_, exists := meta.IndexRoots[column]
+	return exists
 }
 
-func (e *Engine) SeekIndex(txn core.Txn, table, column string, key core.Value) (core.RowIterator, error) {
-	// TODO: Phase 3 - Implement B+-Tree search
-	return nil, fmt.Errorf("SeekIndex not yet implemented in real storage")
+func (e *Engine) CreateIndex(txn core.Txn, table, column string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	meta, err := e.catalog.GetTable(table)
+	if err != nil {
+		return err
+	}
+
+	// 1. Make sure we don't accidentally overwrite an existing index
+	if _, exists := meta.IndexRoots[column]; exists {
+		return fmt.Errorf("index on %s.%s already exists", table, column)
+	}
+
+	// 2. Figure out the next available page ID in our index file.
+	// Since pages are 0-indexed, the total page count is the next safe ID to use!
+	pageCount, err := e.indexFile.getPageCount()
+	if err != nil {
+		return err
+	}
+	rootPageID := pageCount
+
+	// 3. Create a brand new, empty Leaf Node.
+	// (Every B-Tree starts its life as a single leaf node!)
+	rootNode := NewLeafNode(rootPageID)
+
+	// 4. Use the helper we just wrote to pack it into bytes and put it in the buffer pool
+	if err := e.writeNode(rootNode); err != nil {
+		return err
+	}
+
+	// 5. Register this new root page in the catalog and save the catalog to disk
+	meta.IndexRoots[column] = rootPageID
+	return e.catalog.Save(e.dataDir)
 }

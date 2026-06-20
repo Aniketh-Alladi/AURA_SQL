@@ -17,7 +17,10 @@ const PageSize = 4096
 var endian = binary.LittleEndian
 
 type Page struct {
-	Data [PageSize]byte
+	PageID  int
+	Data    [4096]byte
+	IsDirty bool // <-- ADD THIS LINE
+	// ... any other fields you already have like PinCount
 }
 
 // ==========================================
