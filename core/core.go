@@ -179,6 +179,7 @@ type StorageEngine interface {
 	CreateTable(txn Txn, name string, schema Schema) error
 	DropTable(txn Txn, name string) error
 	GetSchema(name string) (Schema, bool)
+	ListTables() []string
 
 	// Rows / DML.
 	Insert(txn Txn, table string, row Row) (RowID, error)

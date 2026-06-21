@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"aurasql/core"
 )
@@ -42,6 +43,16 @@ func (c *Catalog) AddTable(name string, schema core.Schema, hf *HeapFile) error 
 		IndexRoots: make(map[string]int), // Initialize the empty map
 	}
 	return nil
+}
+
+// ListTables returns the names of all registered tables, sorted.
+func (c *Catalog) ListTables() []string {
+	names := make([]string, 0, len(c.tables))
+	for name := range c.tables {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // GetTable retrieves a table's metadata by its name.

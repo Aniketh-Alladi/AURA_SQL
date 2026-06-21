@@ -152,15 +152,32 @@ func insertIntoNodeArrays(node *BTreeNode, key core.Value, ptr uint64) {
 	node.NumKeys++
 }
 
+// allocateIndexPage reserves a fresh page in the shared index file and returns
+// its ID. It physically extends the file with a zeroed page *now*, rather than
+// relying on writeNode (which only marks a cached page dirty and does not grow
+// the file). Without this, two allocations inside a single split — the new right
+// sibling and then the new root — both read the same getPageCount() and collide
+// on one page ID, aliasing two nodes onto one page and creating a cycle.
+func (e *Engine) allocateIndexPage() (int, error) {
+	pageCount, err := e.indexFile.getPageCount()
+	if err != nil {
+		return 0, err
+	}
+	var zero Page
+	if err := e.indexFile.writePage(pageCount, &zero); err != nil {
+		return 0, err
+	}
+	return pageCount, nil
+}
+
 // splitLeafNode takes a full leaf, chops it in half, creates a new right sibling,
 // and returns the key that needs to be pushed up to the parent.
 func (e *Engine) splitLeafNode(leftNode *BTreeNode) (core.Value, int, error) {
 	// 1. Get a new page for the right half
-	pageCount, err := e.indexFile.getPageCount()
+	rightNodeID, err := e.allocateIndexPage()
 	if err != nil {
 		return core.Value{}, 0, err
 	}
-	rightNodeID := pageCount
 	rightNode := NewLeafNode(rightNodeID)
 
 	// 2. Figure out where to chop (exactly in the middle)
@@ -196,11 +213,10 @@ func (e *Engine) splitLeafNode(leftNode *BTreeNode) (core.Value, int, error) {
 // createNewRoot is called when the old Root node splits. The tree grows taller by 1 level!
 func (e *Engine) createNewRoot(table, column string, leftPageID, rightPageID int, upKey core.Value) error {
 	// 1. Allocate a new page for the new Root
-	pageCount, err := e.indexFile.getPageCount()
+	newRootID, err := e.allocateIndexPage()
 	if err != nil {
 		return err
 	}
-	newRootID := pageCount
 
 	// 2. The new root is ALWAYS an Internal Node
 	newRoot := NewInternalNode(newRootID)
