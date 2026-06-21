@@ -83,6 +83,17 @@ func (e *Engine) GetSchema(name string) (core.Schema, bool) {
 	return t.schema, true
 }
 
+func (e *Engine) ListTables() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	names := make([]string, 0, len(e.tables))
+	for name := range e.tables {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (e *Engine) Insert(_ core.Txn, name string, row core.Row) (core.RowID, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

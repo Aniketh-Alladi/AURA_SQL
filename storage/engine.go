@@ -146,6 +146,13 @@ func (e *Engine) GetSchema(name string) (core.Schema, bool) {
 	return meta.Schema, true
 }
 
+// ListTables returns the names of all tables in the catalog, sorted.
+func (e *Engine) ListTables() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.catalog.ListTables()
+}
+
 // ==========================================
 // 3. DML Wrappers & Iterator
 // ==========================================

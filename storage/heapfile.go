@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"io"
 	"os"
 
 	"aurasql/core"
@@ -56,13 +57,23 @@ func (hf *HeapFile) Close() error {
 // ==========================================
 
 // readPage pulls exactly 4096 bytes from disk into a Page struct.
+//
+// A page can be allocated (its ID handed out) before it is physically written —
+// e.g. a new node created during a B-tree split. Reading such a page lands at or
+// beyond end-of-file, which ReadAt reports as io.EOF with zero bytes read. That
+// is not an error: the page simply has no contents yet, so we return a fresh
+// zeroed page (Page.Data is already all zeros). A *partial* read (some bytes,
+// then EOF) means a torn/corrupt page and is still surfaced as an error.
 func (hf *HeapFile) readPage(pageID int) (*Page, error) {
 	page := &Page{}
 	offset := int64(pageID * PageSize)
 
-	// ReadAt reads exactly len(page.Data) bytes starting at the given offset
-	_, err := hf.file.ReadAt(page.Data[:], offset)
+	n, err := hf.file.ReadAt(page.Data[:], offset)
 	if err != nil {
+		if err == io.EOF && n == 0 {
+			// Never-written page: hand back the zeroed buffer.
+			return page, nil
+		}
 		return nil, err
 	}
 	return page, nil
