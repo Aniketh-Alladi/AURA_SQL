@@ -264,6 +264,21 @@ func (*SelectStmt) isStatement()      {}
 func (*UpdateStmt) isStatement()      {}
 func (*DeleteStmt) isStatement()      {}
 
+// ---- Transaction Control Statements ----
+
+// BeginStmt represents BEGIN [TRANSACTION] or START TRANSACTION.
+type BeginStmt struct{}
+
+// CommitStmt represents COMMIT [TRANSACTION] or END.
+type CommitStmt struct{}
+
+// RollbackStmt represents ROLLBACK [TRANSACTION].
+type RollbackStmt struct{}
+
+func (*BeginStmt) isStatement()    {}
+func (*CommitStmt) isStatement()   {}
+func (*RollbackStmt) isStatement() {}
+
 // ---- Expressions ----
 
 // Expr is any expression appearing in a projection, value list, or predicate.

@@ -29,12 +29,20 @@ const (
 	TokenBoolType
 	TokenTrue
 	TokenFalse
-	TokenDelete // DELETE
+	TokenDelete
 	TokenUpdate
 	TokenSet
 	TokenJoin
 	TokenOn
-	TokenIndex // INDEX
+	TokenIndex
+
+	// Transaction control keywords
+	TokenBegin
+	TokenCommit
+	TokenRollback
+	TokenTransaction
+	TokenStart
+	TokenEnd
 
 	// Literals & Identifiers
 	TokenIdentifier
@@ -105,6 +113,18 @@ func (t TokenType) String() string {
 		return "true"
 	case TokenFalse:
 		return "false"
+	case TokenBegin:
+		return "BEGIN"
+	case TokenCommit:
+		return "COMMIT"
+	case TokenRollback:
+		return "ROLLBACK"
+	case TokenTransaction:
+		return "TRANSACTION"
+	case TokenStart:
+		return "START"
+	case TokenEnd:
+		return "END"
 	case TokenIdentifier:
 		return "IDENTIFIER"
 	case TokenIntLiteral:
@@ -159,8 +179,6 @@ func NewLexer(input string) *Lexer {
 	return &Lexer{input: []rune(input)}
 }
 
-// NextToken scans and returns the next available Token.
-// NextToken scans and returns the next available Token.
 // NextToken scans and returns the next available Token.
 func (l *Lexer) NextToken() Token {
 	l.skipWhitespace()
@@ -296,7 +314,7 @@ func (l *Lexer) readIdentifierOrKeyword() Token {
 		return Token{Type: TokenInto, Value: val}
 	case "VALUES":
 		return Token{Type: TokenValues, Value: val}
-	case "DELETE": // <--- ADD THIS CASE HERE
+	case "DELETE":
 		return Token{Type: TokenDelete, Value: val}
 	case "UPDATE":
 		return Token{Type: TokenUpdate, Value: val}
@@ -322,6 +340,19 @@ func (l *Lexer) readIdentifierOrKeyword() Token {
 		return Token{Type: TokenTrue, Value: val}
 	case "FALSE":
 		return Token{Type: TokenFalse, Value: val}
+	// NEW TRANSACTION KEYWORDS
+	case "BEGIN":
+		return Token{Type: TokenBegin, Value: val}
+	case "COMMIT":
+		return Token{Type: TokenCommit, Value: val}
+	case "ROLLBACK":
+		return Token{Type: TokenRollback, Value: val}
+	case "TRANSACTION":
+		return Token{Type: TokenTransaction, Value: val}
+	case "START":
+		return Token{Type: TokenStart, Value: val}
+	case "END":
+		return Token{Type: TokenEnd, Value: val}
 	}
 
 	return Token{Type: TokenIdentifier, Value: val}
