@@ -142,6 +142,8 @@ type RowID uint64
 // Row holds one Value per column, in the same order as the table's Schema.
 type Row struct {
 	Values []Value
+	Xmin   uint64 // Transaction ID that created this version
+	Xmax   uint64 // Transaction ID that deleted this version (0 if active)
 }
 
 // ============================================================
