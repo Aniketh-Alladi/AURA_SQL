@@ -11,29 +11,34 @@ import (
 )
 
 // ==========================================
-// 1. The Transaction Shell (Phase 1)
+// 1. Transaction & Engine Structures
 // ==========================================
 
-type txn struct{ id uint64 }
-
-func (t *txn) ID() uint64      { return t.id }
-func (t *txn) Commit() error   { return nil }
-func (t *txn) Rollback() error { return nil }
-
-// ==========================================
-// 2. Engine Core & DDL (Data Definition)
-// ==========================================
-
-type Engine struct {
-	mu        sync.Mutex
-	catalog   *Catalog
-	dataDir   string
-	nextTx    uint64
-	indexFile *HeapFile
-	indexPool *BufferPool
+type txn struct {
+	id     uint64
+	engine *Engine
 }
 
-// New creates a new StorageEngine saving data to the specified directory.
+func (t *txn) ID() uint64      { return t.id }
+func (t *txn) Commit() error   { return t.engine.commit(t.id) }
+func (t *txn) Rollback() error { return t.engine.rollback(t.id) }
+
+type Engine struct {
+	mu           sync.Mutex
+	catalog      *Catalog
+	dataDir      string
+	nextTx       uint64
+	activeTxns   map[uint64]bool
+	committed    map[uint64]bool
+	txnSnapshots map[uint64]map[uint64]bool // txn ID -> committed-set frozen at Begin
+	indexFile    *HeapFile
+	indexPool    *BufferPool
+}
+
+// ==========================================
+// 2. Lifecycle
+// ==========================================
+
 func New(dataDir string) (*Engine, error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		return nil, err
@@ -44,10 +49,7 @@ func New(dataDir string) (*Engine, error) {
 		return nil, err
 	}
 
-	// Spin up the dedicated file and Buffer Pool for our B-Tree Indexes
 	indexPath := filepath.Join(dataDir, "indexes.db")
-
-	// Check if it exists before creating
 	_, err := os.Stat(indexPath)
 	isNew := os.IsNotExist(err)
 
@@ -57,48 +59,160 @@ func New(dataDir string) (*Engine, error) {
 	}
 
 	if isNew {
-		// Write the first page AND initialize it as a proper page
-		emptyPage := NewPage() // Use NewPage() instead of raw bytes
-		// Write page 0
+		emptyPage := NewPage()
 		if _, err := idxFile.file.WriteAt(emptyPage.Data[:], 0); err != nil {
 			return nil, err
 		}
 	}
 
-	// Create a buffer pool specifically for indexes (e.g., 100 pages)
 	idxPool := NewBufferPool(idxFile, 100)
 	idxFile.SetBufferPool(idxPool)
 
-	// Pre-load page 0 into the pool if it's new
 	if isNew {
-		// Force page 0 into the cache
-		_, err := idxPool.FetchPage(0)
-		if err != nil {
+		if _, err := idxPool.FetchPage(0); err != nil {
 			return nil, err
 		}
 	}
 
 	return &Engine{
-		catalog:   cat,
-		dataDir:   dataDir,
-		indexFile: idxFile,
-		indexPool: idxPool,
+		catalog:      cat,
+		dataDir:      dataDir,
+		indexFile:    idxFile,
+		indexPool:    idxPool,
+		activeTxns:   make(map[uint64]bool),
+		committed:    make(map[uint64]bool),
+		txnSnapshots: make(map[uint64]map[uint64]bool),
 	}, nil
 }
 
+func (e *Engine) Close() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, meta := range e.catalog.tables {
+		meta.HeapFile.pool.FlushAll()
+		meta.HeapFile.Close()
+	}
+
+	if e.indexPool != nil {
+		e.indexPool.FlushAll()
+		e.indexFile.Close()
+	}
+
+	return nil
+}
+
+// ==========================================
+// 3. Transaction Management (MVCC)
+// ==========================================
+
+// Begin initializes a new transaction, marks it active, and freezes its read
+// snapshot: the set of transactions committed as of this moment. All visibility
+// checks for this txn read against that frozen set, NOT the live committed map.
+// This is what gives us snapshot isolation rather than read-committed.
 func (e *Engine) Begin() (core.Txn, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.nextTx++
-	return &txn{id: e.nextTx}, nil
+
+	snap := make(map[uint64]bool, len(e.committed))
+	for id := range e.committed {
+		snap[id] = true
+	}
+	e.txnSnapshots[e.nextTx] = snap
+
+	e.activeTxns[e.nextTx] = true
+	return &txn{id: e.nextTx, engine: e}, nil
 }
+
+// commit moves the transaction from active to committed status.
+func (e *Engine) commit(txID uint64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if _, active := e.activeTxns[txID]; !active {
+		return fmt.Errorf("transaction %d not active", txID)
+	}
+
+	delete(e.activeTxns, txID)
+	delete(e.txnSnapshots, txID)
+	e.committed[txID] = true
+	return nil
+}
+
+// rollback removes the transaction from active status; it becomes effectively aborted.
+func (e *Engine) rollback(txID uint64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// It never enters 'committed', so any versions it created are ignored by visibility.
+	delete(e.activeTxns, txID)
+	delete(e.txnSnapshots, txID)
+	return nil
+}
+
+// isVisible checks whether a row version is visible to a specific transaction
+// under that transaction's frozen snapshot.
+func (e *Engine) isVisible(txnID uint64, xmin uint64, xmax uint64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	snap := e.txnSnapshots[txnID]
+
+	// committed reports whether `id` was committed AS OF this txn's snapshot.
+	// Fallback to the live committed map if no snapshot exists (defensive: a
+	// live txn always has one, so this only covers use-after-commit edge cases).
+	committed := func(id uint64) bool {
+		if snap != nil {
+			return snap[id]
+		}
+		return e.committed[id]
+	}
+
+	// Created and visible: I created it, or its creator committed in my snapshot.
+	createdVisible := xmin == txnID || committed(xmin)
+	if !createdVisible {
+		return false
+	}
+
+	// Deleted from my perspective: xmax set, and either I deleted it or its
+	// deleter committed in my snapshot.
+	deleted := xmax != 0 && (xmax == txnID || committed(xmax))
+	return !deleted
+}
+
+// checkWriteConflict implements first-updater-wins. A conflict exists if the row
+// we are about to write has already been touched by a transaction that committed
+// outside our view.
+func (e *Engine) checkWriteConflict(txnID uint64, row core.Row) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	snap := e.txnSnapshots[txnID]
+
+	// Case A: someone already stamped this row's Xmax and committed -> conflict.
+	if row.Xmax != 0 && row.Xmax != txnID && e.committed[row.Xmax] {
+		return fmt.Errorf("write conflict: row modified by a concurrent transaction")
+	}
+
+	// Case B: the version we're about to overwrite was created by a txn that
+	// committed AFTER we began (absent from our snapshot) -> conflict.
+	if snap != nil && row.Xmin != txnID && e.committed[row.Xmin] && !snap[row.Xmin] {
+		return fmt.Errorf("write conflict: row modified by a transaction that committed after this one began")
+	}
+
+	return nil
+}
+
+// ==========================================
+// 4. DDL (Data Definition)
+// ==========================================
 
 func (e *Engine) CreateTable(_ core.Txn, name string, schema core.Schema) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	filepath := filepath.Join(e.dataDir, name+".db")
-	hf, err := NewHeapFile(filepath)
+	path := filepath.Join(e.dataDir, name+".db")
+	hf, err := NewHeapFile(path)
 	if err != nil {
 		return err
 	}
@@ -106,8 +220,7 @@ func (e *Engine) CreateTable(_ core.Txn, name string, schema core.Schema) error 
 	pool := NewBufferPool(hf, 100)
 	hf.SetBufferPool(pool)
 
-	err = e.catalog.AddTable(name, schema, hf)
-	if err != nil {
+	if err := e.catalog.AddTable(name, schema, hf); err != nil {
 		return err
 	}
 
@@ -127,8 +240,7 @@ func (e *Engine) DropTable(_ core.Txn, name string) error {
 	meta.HeapFile.Close()
 	os.Remove(meta.HeapFile.file.Name())
 
-	err = e.catalog.DropTable(name)
-	if err != nil {
+	if err := e.catalog.DropTable(name); err != nil {
 		return err
 	}
 
@@ -154,10 +266,13 @@ func (e *Engine) ListTables() []string {
 }
 
 // ==========================================
-// 3. DML Wrappers & Iterator
+// 5. DML Wrappers (MVCC)
 // ==========================================
 
-func (e *Engine) Insert(_ core.Txn, table string, row core.Row) (core.RowID, error) {
+func (e *Engine) Insert(txn core.Txn, table string, row core.Row) (core.RowID, error) {
+	row.Xmin = txn.ID()
+	row.Xmax = 0
+
 	meta, err := e.catalog.GetTable(table)
 	if err != nil {
 		return 0, err
@@ -168,15 +283,10 @@ func (e *Engine) Insert(_ core.Txn, table string, row core.Row) (core.RowID, err
 		return 0, err
 	}
 
-	for colIdx, col := range meta.Schema.Columns {
-		if _, hasIndex := meta.IndexRoots[col.Name]; hasIndex {
-			val := row.Values[colIdx]
-			if val.Null {
-				continue
-			}
-			err := e.InsertIntoIndex(table, col.Name, val, id)
-			if err != nil {
-				return 0, fmt.Errorf("failed to update index on %s.%s: %w", table, col.Name, err)
+	for i, col := range meta.Schema.Columns {
+		if _, has := meta.IndexRoots[col.Name]; has && !row.Values[i].Null {
+			if err := e.InsertIntoIndex(table, col.Name, row.Values[i], id); err != nil {
+				return id, fmt.Errorf("failed to update index on %s.%s: %w", table, col.Name, err)
 			}
 		}
 	}
@@ -184,82 +294,41 @@ func (e *Engine) Insert(_ core.Txn, table string, row core.Row) (core.RowID, err
 	return id, nil
 }
 
-func (e *Engine) Update(_ core.Txn, table string, id core.RowID, row core.Row) error {
+func (e *Engine) Update(txn core.Txn, table string, id core.RowID, row core.Row) error {
 	meta, err := e.catalog.GetTable(table)
 	if err != nil {
 		return err
 	}
 
-	// Get the old row BEFORE updating
-	oldRowBytes, err := meta.HeapFile.Get(id)
+	data, err := meta.HeapFile.Get(id)
 	if err != nil {
 		return err
 	}
-	oldRow := Deserialize(oldRowBytes)
+	oldRow := Deserialize(data)
 
-	// Try to update in-place first
-	err = meta.HeapFile.Update(id, Serialize(row))
-	if err != nil && err.Error() == "row too large" {
-		// Row grew too large - need to delete and re-insert
-		// First delete from indexes
-		for colIdx, col := range meta.Schema.Columns {
-			if _, hasIndex := meta.IndexRoots[col.Name]; hasIndex {
-				oldVal := oldRow.Values[colIdx]
-				if !oldVal.Null {
-					if err := e.DeleteFromIndex(table, col.Name, oldVal, id); err != nil {
-						return fmt.Errorf("failed to delete from index on %s.%s: %w", table, col.Name, err)
-					}
-				}
-			}
-		}
-
-		// Delete from heap file
-		if err := meta.HeapFile.Delete(id); err != nil {
-			return err
-		}
-
-		// Insert the new row (gets a new RowID)
-		newID, err := meta.HeapFile.Insert(Serialize(row))
-		if err != nil {
-			return err
-		}
-
-		// Insert into indexes with the new RowID
-		for colIdx, col := range meta.Schema.Columns {
-			if _, hasIndex := meta.IndexRoots[col.Name]; hasIndex {
-				newVal := row.Values[colIdx]
-				if !newVal.Null {
-					if err := e.InsertIntoIndex(table, col.Name, newVal, newID); err != nil {
-						return fmt.Errorf("failed to insert into index on %s.%s: %w", table, col.Name, err)
-					}
-				}
-			}
-		}
-		return nil
-	} else if err != nil {
+	if err := e.checkWriteConflict(txn.ID(), oldRow); err != nil {
 		return err
 	}
 
-	// In-place update worked, update indexes
-	for colIdx, col := range meta.Schema.Columns {
-		if _, hasIndex := meta.IndexRoots[col.Name]; hasIndex {
-			oldVal := oldRow.Values[colIdx]
-			newVal := row.Values[colIdx]
+	// MVCC update: keep the old version (stamp Xmax so older snapshots still
+	// see it) and write a brand-new version. We do NOT overwrite Xmin.
+	oldRow.Xmax = txn.ID()
+	if err := meta.HeapFile.Update(id, Serialize(oldRow)); err != nil {
+		return err
+	}
 
-			// If the value changed, update the index
-			if !valuesEqual(oldVal, newVal) {
-				// Remove old entry
-				if !oldVal.Null {
-					if err := e.DeleteFromIndex(table, col.Name, oldVal, id); err != nil {
-						return fmt.Errorf("failed to delete from index on %s.%s: %w", table, col.Name, err)
-					}
-				}
-				// Add new entry
-				if !newVal.Null {
-					if err := e.InsertIntoIndex(table, col.Name, newVal, id); err != nil {
-						return fmt.Errorf("failed to insert into index on %s.%s: %w", table, col.Name, err)
-					}
-				}
+	row.Xmin = txn.ID()
+	row.Xmax = 0
+	newID, err := meta.HeapFile.Insert(Serialize(row))
+	if err != nil {
+		return err
+	}
+
+	// Index the new version (mirrors what Insert does).
+	for i, col := range meta.Schema.Columns {
+		if _, has := meta.IndexRoots[col.Name]; has && !row.Values[i].Null {
+			if err := e.InsertIntoIndex(table, col.Name, row.Values[i], newID); err != nil {
+				return fmt.Errorf("failed to update index on %s.%s: %w", table, col.Name, err)
 			}
 		}
 	}
@@ -267,56 +336,53 @@ func (e *Engine) Update(_ core.Txn, table string, id core.RowID, row core.Row) e
 	return nil
 }
 
-func (e *Engine) Delete(_ core.Txn, table string, id core.RowID) error {
+func (e *Engine) Delete(txn core.Txn, table string, id core.RowID) error {
 	meta, err := e.catalog.GetTable(table)
 	if err != nil {
 		return err
 	}
 
-	// Get the row first to remove from indexes
-	rowBytes, err := meta.HeapFile.Get(id)
+	data, err := meta.HeapFile.Get(id)
 	if err != nil {
 		return err
 	}
-	row := Deserialize(rowBytes)
+	row := Deserialize(data)
 
-	// Remove from indexes
-	for colIdx, col := range meta.Schema.Columns {
-		if _, hasIndex := meta.IndexRoots[col.Name]; hasIndex {
-			val := row.Values[colIdx]
-			if !val.Null {
-				if err := e.DeleteFromIndex(table, col.Name, val, id); err != nil {
-					return fmt.Errorf("failed to delete from index on %s.%s: %w", table, col.Name, err)
-				}
-			}
-		}
+	if err := e.checkWriteConflict(txn.ID(), row); err != nil {
+		return err
 	}
 
-	// Delete from heap file
-	return meta.HeapFile.Delete(id)
+	// Logical (MVCC) delete: stamp Xmax, leave the tuple in place.
+	row.Xmax = txn.ID()
+	return meta.HeapFile.Update(id, Serialize(row))
 }
 
-func (e *Engine) Scan(_ core.Txn, table string) (core.RowIterator, error) {
+func (e *Engine) Scan(txn core.Txn, table string) (core.RowIterator, error) {
 	meta, err := e.catalog.GetTable(table)
 	if err != nil {
 		return nil, err
 	}
-
-	pageCount, err := meta.HeapFile.getPageCount()
+	cnt, err := meta.HeapFile.getPageCount()
 	if err != nil {
 		return nil, err
 	}
-
 	return &heapFileIterator{
 		hf:        meta.HeapFile,
-		pageCount: pageCount,
-		currPage:  0,
-		currSlot:  0,
+		engine:    e,
+		txnID:     txn.ID(),
+		pageCount: cnt,
 	}, nil
 }
 
+// ==========================================
+// 6. Iterators
+// ==========================================
+
 type heapFileIterator struct {
 	hf        *HeapFile
+	engine    *Engine
+	txnID     uint64
+	raw       bool // when true, skip MVCC visibility (used for index builds)
 	pageCount int
 	currPage  int
 	currSlot  int
@@ -343,9 +409,11 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 			}
 
 			dataOffset := int(page.Data[slotOffset]) | int(page.Data[slotOffset+1])<<8
-			rawRow := page.Data[dataOffset : dataOffset+length]
+			row := Deserialize(page.Data[dataOffset : dataOffset+length])
 
-			return id, Deserialize(rawRow), true, nil
+			if it.raw || it.engine.isVisible(it.txnID, row.Xmin, row.Xmax) {
+				return id, row, true, nil
+			}
 		}
 
 		it.currPage++
@@ -354,27 +422,10 @@ func (it *heapFileIterator) Next() (core.RowID, core.Row, bool, error) {
 	return 0, core.Row{}, false, nil
 }
 
-func (e *Engine) Close() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	for _, meta := range e.catalog.tables {
-		meta.HeapFile.pool.FlushAll()
-		meta.HeapFile.Close()
-	}
-
-	if e.indexPool != nil {
-		e.indexPool.FlushAll()
-		e.indexFile.Close()
-	}
-
-	return nil
-}
-
 func (it *heapFileIterator) Close() error { return nil }
 
 // ==========================================
-// 4. Indexing (Phase 3)
+// 7. Indexing
 // ==========================================
 
 func (e *Engine) HasIndex(table, column string) bool {
@@ -401,19 +452,14 @@ func (e *Engine) CreateIndex(txn core.Txn, table, column string) error {
 		return fmt.Errorf("index on %s.%s already exists", table, column)
 	}
 
-	// Get current page count to determine where to write
 	pageCount, err := e.indexFile.getPageCount()
 	if err != nil {
 		return err
 	}
 
-	// Create the new root node at the next available page ID
 	rootPageID := pageCount
-
-	// Create a new leaf node in memory
 	rootNode := NewLeafNode(rootPageID)
 
-	// Write the node to disk at the new page ID
 	pageData := make([]byte, PageSize)
 	if err := e.writeNodeToBytes(rootNode, pageData); err != nil {
 		return err
@@ -433,7 +479,6 @@ func (e *Engine) CreateIndex(txn core.Txn, table, column string) error {
 
 	meta.IndexRoots[column] = rootPageID
 
-	// Populate the index with existing rows
 	colIdx := -1
 	for i, col := range meta.Schema.Columns {
 		if col.Name == column {
@@ -491,7 +536,11 @@ func (e *Engine) writeNodeToBytes(node *BTreeNode, data []byte) error {
 	return nil
 }
 
-func (e *Engine) scanTable(txn core.Txn, table string) (core.RowIterator, error) {
+// scanTable returns a raw (non-MVCC) iterator over all physical rows. It is used
+// for index builds, where every live tuple must be indexed. It must NOT apply
+// visibility filtering: callers (CreateIndex) hold e.mu, and isVisible also takes
+// e.mu, so a filtering scan here would self-deadlock.
+func (e *Engine) scanTable(_ core.Txn, table string) (core.RowIterator, error) {
 	meta, err := e.catalog.GetTable(table)
 	if err != nil {
 		return nil, err
@@ -504,9 +553,8 @@ func (e *Engine) scanTable(txn core.Txn, table string) (core.RowIterator, error)
 
 	return &heapFileIterator{
 		hf:        meta.HeapFile,
+		raw:       true,
 		pageCount: pageCount,
-		currPage:  0,
-		currSlot:  0,
 	}, nil
 }
 

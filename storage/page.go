@@ -42,35 +42,32 @@ func NewPage() *Page {
 // Serialize takes a core.Row and flattens it into a raw byte slice.
 const NullTag byte = 255
 
-// Serialize flattens a core.Row into a raw byte slice.
 func Serialize(row core.Row) []byte {
-	var buf []byte // Think of this as an empty Python list that we will append to
+	// 1. Allocate 16 bytes for the header (Xmin + Xmax)
+	buf := make([]byte, 16)
+	endian.PutUint64(buf[0:8], row.Xmin)
+	endian.PutUint64(buf[8:16], row.Xmax)
 
+	// 2. Append the existing column data
 	for _, v := range row.Values {
 		if v.Null {
 			buf = append(buf, NullTag)
 			continue
 		}
-
-		// Write a 1-byte tag for the type (0 for Int, 1 for Text, 2 for Bool)
 		buf = append(buf, byte(v.Type))
-
-		// Write the actual payload based on the type
 		switch v.Type {
 		case core.TypeInt:
-			b := make([]byte, 8) // Allocate 8 bytes
+			b := make([]byte, 8)
 			endian.PutUint64(b, uint64(v.Int))
-			buf = append(buf, b...) // The '...' unrolls the slice, like *args in Python
-
+			buf = append(buf, b...)
 		case core.TypeBool:
 			if v.Bool {
 				buf = append(buf, 1)
 			} else {
 				buf = append(buf, 0)
 			}
-
 		case core.TypeText:
-			strBytes := []byte(v.Str) // Cast string to raw bytes
+			strBytes := []byte(v.Str)
 			length := make([]byte, 2)
 			endian.PutUint16(length, uint16(len(strBytes)))
 			buf = append(buf, length...)
@@ -80,35 +77,32 @@ func Serialize(row core.Row) []byte {
 	return buf
 }
 
-// Deserialize reads a raw byte slice and reconstructs a core.Row.
 func Deserialize(data []byte) core.Row {
+	// 1. Read the MVCC header
+	xmin := endian.Uint64(data[0:8])
+	xmax := endian.Uint64(data[8:16])
+
+	// 2. Parse values starting from offset 16
 	var values []core.Value
-	cursor := 0 // Our memory pointer
+	cursor := 16
 
 	for cursor < len(data) {
 		tag := data[cursor]
 		cursor++
-
 		if tag == NullTag {
-			// We don't know the exact type if it's strictly null without schema,
-			// but for core scope, returning a generic null value works.
 			values = append(values, core.Value{Null: true})
 			continue
 		}
-
 		colType := core.ColumnType(tag)
-
 		switch colType {
 		case core.TypeInt:
-			val := endian.Uint64(data[cursor : cursor+8]) // Read 8 bytes
+			val := endian.Uint64(data[cursor : cursor+8])
 			values = append(values, core.NewInt(int64(val)))
 			cursor += 8
-
 		case core.TypeBool:
 			val := data[cursor] == 1
 			values = append(values, core.NewBool(val))
 			cursor++
-
 		case core.TypeText:
 			strLen := int(endian.Uint16(data[cursor : cursor+2]))
 			cursor += 2
@@ -118,7 +112,7 @@ func Deserialize(data []byte) core.Row {
 		}
 	}
 
-	return core.Row{Values: values}
+	return core.Row{Values: values, Xmin: xmin, Xmax: xmax}
 }
 
 // ==========================================

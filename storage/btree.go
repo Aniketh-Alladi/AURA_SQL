@@ -1,10 +1,9 @@
 package storage
 
 import (
+	"aurasql/core"
 	"encoding/binary"
 	"fmt"
-
-	"aurasql/core"
 )
 
 const (
@@ -14,15 +13,81 @@ const (
 
 // BTreeNode represents an in-memory view of a 4KB B+-Tree page.
 type BTreeNode struct {
-	PageID   int    // The physical page number where this node lives
-	NodeType uint16 // NodeTypeInternal or NodeTypeLeaf
-	NumKeys  uint16 // How many keys are currently in this node
-	NextLeaf int    // Right sibling pointer for range scans (Leaf only. -1 means none)
-
-	// In a B+-Tree, keys and pointers are kept in sorted order.
+	PageID   int
+	NodeType uint16
+	NumKeys  uint16
+	NextLeaf int
 	Keys     []core.Value
 	Pointers []uint64
 }
+
+// ==========================================
+// 1. Iterator Definition
+// ==========================================
+
+type btreeIterator struct {
+	engine   *Engine
+	txnID    uint64
+	table    string
+	seekKey  core.Value
+	currNode *BTreeNode
+	currIdx  int
+}
+
+func (it *btreeIterator) Next() (core.RowID, core.Row, bool, error) {
+	for {
+		if it.currNode == nil {
+			return 0, core.Row{}, false, nil
+		}
+
+		// If we exhausted the current node, move to the next leaf sibling
+		if it.currIdx >= int(it.currNode.NumKeys) {
+			if it.currNode.NextLeaf == -1 {
+				return 0, core.Row{}, false, nil
+			}
+			nextNode, err := it.engine.fetchNode(it.currNode.NextLeaf)
+			if err != nil {
+				return 0, core.Row{}, false, err
+			}
+			it.currNode = nextNode
+			it.currIdx = 0
+			continue
+		}
+
+		val := it.currNode.Keys[it.currIdx]
+		cmp, err := val.Compare(it.seekKey)
+		if err != nil {
+			return 0, core.Row{}, false, err
+		}
+
+		// If we've passed the seek range, we are done
+		if cmp > 0 {
+			return 0, core.Row{}, false, nil
+		}
+
+		if cmp == 0 {
+			rowID := core.RowID(it.currNode.Pointers[it.currIdx])
+			it.currIdx++
+
+			row, err := it.engine.fetchRowByID(it.table, rowID)
+			if err != nil {
+				// Row might be deleted; skip and continue
+				continue
+			}
+
+			// --- MVCC FILTER ---
+			// Only return the row if it's visible to the current transaction
+			if !it.engine.isVisible(it.txnID, row.Xmin, row.Xmax) {
+				continue
+			}
+
+			return rowID, row, true, nil
+		}
+		it.currIdx++
+	}
+}
+
+func (it *btreeIterator) Close() error { return nil }
 
 // NewLeafNode creates a fresh, empty leaf node in memory.
 func NewLeafNode(pageID int) *BTreeNode {
@@ -154,19 +219,15 @@ func (e *Engine) findLeaf(rootPageID int, key core.Value) (*BTreeNode, error) {
 	}
 }
 
-// SeekIndex implements the Phase 3 contract. It finds the starting leaf
-// for a given key and returns an iterator that scans horizontally.
 func (e *Engine) SeekIndex(txn core.Txn, table, column string, key core.Value) (core.RowIterator, error) {
 	rootPageID, err := e.getIndexRootPage(table, column)
 	if err != nil {
 		return nil, err
 	}
-
 	leafNode, err := e.findLeaf(rootPageID, key)
 	if err != nil {
 		return nil, err
 	}
-
 	startIdx := 0
 	for startIdx < int(leafNode.NumKeys) {
 		cmp, _ := leafNode.Keys[startIdx].Compare(key)
@@ -175,73 +236,14 @@ func (e *Engine) SeekIndex(txn core.Txn, table, column string, key core.Value) (
 		}
 		startIdx++
 	}
-
 	return &btreeIterator{
 		engine:   e,
+		txnID:    txn.ID(),
 		table:    table,
 		seekKey:  key,
 		currNode: leafNode,
 		currIdx:  startIdx,
 	}, nil
-}
-
-// btreeIterator scans horizontally across leaf nodes.
-type btreeIterator struct {
-	engine   *Engine
-	table    string
-	seekKey  core.Value
-	currNode *BTreeNode
-	currIdx  int
-}
-
-func (it *btreeIterator) Next() (core.RowID, core.Row, bool, error) {
-	for {
-		if it.currNode == nil {
-			return 0, core.Row{}, false, nil
-		}
-
-		if it.currIdx >= int(it.currNode.NumKeys) {
-			if it.currNode.NextLeaf == -1 {
-				return 0, core.Row{}, false, nil
-			}
-
-			nextNode, err := it.engine.fetchNode(it.currNode.NextLeaf)
-			if err != nil {
-				return 0, core.Row{}, false, err
-			}
-			it.currNode = nextNode
-			it.currIdx = 0
-			continue
-		}
-
-		val := it.currNode.Keys[it.currIdx]
-		cmp, err := val.Compare(it.seekKey)
-		if err != nil {
-			return 0, core.Row{}, false, err
-		}
-
-		if cmp > 0 {
-			return 0, core.Row{}, false, nil
-		}
-
-		if cmp == 0 {
-			rowID := core.RowID(it.currNode.Pointers[it.currIdx])
-			it.currIdx++
-
-			row, err := it.engine.fetchRowByID(it.table, rowID)
-			if err != nil {
-				return 0, core.Row{}, false, err
-			}
-
-			return rowID, row, true, nil
-		}
-
-		it.currIdx++
-	}
-}
-
-func (it *btreeIterator) Close() error {
-	return nil
 }
 
 // --- Helpers ---
