@@ -17,8 +17,21 @@
 package core
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+)
+
+// ============================================================
+// Error sentinels for MVCC write conflicts
+// ============================================================
+
+var (
+	// ErrWriteConflict indicates a write-write conflict between concurrent transactions.
+	ErrWriteConflict = errors.New("write conflict: row modified by a concurrent transaction")
+
+	// ErrSerializationConflict indicates a serialization conflict.
+	ErrSerializationConflict = errors.New("serialization conflict: cannot serialize concurrent transactions")
 )
 
 // ============================================================
