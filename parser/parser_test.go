@@ -349,3 +349,141 @@ func TestParseCreateIndexSuccess(t *testing.T) {
 		}
 	})
 }
+
+// ============================================================
+// Phase 4: Transaction Control Statement Tests
+// ============================================================
+
+func TestParseBeginSuccess(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"BEGIN", "BEGIN"},
+		{"BEGIN TRANSACTION", "BEGIN TRANSACTION"},
+		{"START TRANSACTION", "START TRANSACTION"},
+		{"begin lowercase", "begin"},
+		{"Begin mixed case", "Begin"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmt, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse failed unexpectedly: %v", err)
+			}
+
+			_, ok := stmt.(*core.BeginStmt)
+			if !ok {
+				t.Fatalf("Expected *core.BeginStmt, got %T", stmt)
+			}
+		})
+	}
+}
+
+func TestParseCommitSuccess(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"COMMIT", "COMMIT"},
+		{"COMMIT TRANSACTION", "COMMIT TRANSACTION"},
+		{"END", "END"},
+		{"commit lowercase", "commit"},
+		{"Commit mixed case", "Commit"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmt, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse failed unexpectedly: %v", err)
+			}
+
+			_, ok := stmt.(*core.CommitStmt)
+			if !ok {
+				t.Fatalf("Expected *core.CommitStmt, got %T", stmt)
+			}
+		})
+	}
+}
+
+func TestParseRollbackSuccess(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"ROLLBACK", "ROLLBACK"},
+		{"ROLLBACK TRANSACTION", "ROLLBACK TRANSACTION"},
+		{"rollback lowercase", "rollback"},
+		{"Rollback mixed case", "Rollback"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmt, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse failed unexpectedly: %v", err)
+			}
+
+			_, ok := stmt.(*core.RollbackStmt)
+			if !ok {
+				t.Fatalf("Expected *core.RollbackStmt, got %T", stmt)
+			}
+		})
+	}
+}
+
+// TestTransactionTrailingJunkError verifies that trailing tokens after
+// transaction statements cause errors (as required by Phase 4 brief).
+func TestTransactionTrailingJunkError(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"BEGIN with extra", "BEGIN EXTRA"},
+		{"BEGIN TRANSACTION with extra", "BEGIN TRANSACTION EXTRA"},
+		{"START TRANSACTION with extra", "START TRANSACTION EXTRA"},
+		{"COMMIT with extra", "COMMIT EXTRA"},
+		{"COMMIT TRANSACTION with extra", "COMMIT TRANSACTION EXTRA"},
+		{"END with extra", "END EXTRA"},
+		{"ROLLBACK with extra", "ROLLBACK EXTRA"},
+		{"ROLLBACK TRANSACTION with extra", "ROLLBACK TRANSACTION EXTRA"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse(tt.sql)
+			if err == nil {
+				t.Errorf("Expected error for trailing junk, got nil")
+			}
+		})
+	}
+}
+
+// TestTransactionIncompleteStatements tests that incomplete transaction
+// statements error appropriately.
+func TestTransactionIncompleteStatements(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"BEGIN with transaction only", "BEGIN TRANSACTION"},
+		{"START with transaction only", "START TRANSACTION"},
+		{"COMMIT with transaction only", "COMMIT TRANSACTION"},
+		{"ROLLBACK with transaction only", "ROLLBACK TRANSACTION"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// These should parse successfully (they're valid)
+			stmt, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Expected valid statement, got error: %v", err)
+			}
+			if stmt == nil {
+				t.Error("Expected non-nil statement")
+			}
+		})
+	}
+}

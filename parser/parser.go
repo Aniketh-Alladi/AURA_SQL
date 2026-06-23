@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"aurasql/core" // Use the precise import path from your brief
+	"aurasql/core"
 )
 
 // Parser consumes tokens from a Lexer and constructs a core.Statement AST.
@@ -17,7 +17,6 @@ type Parser struct {
 // NewParser initializes a parser with a given SQL string.
 func NewParser(sql string) *Parser {
 	p := &Parser{lexer: NewLexer(sql)}
-	// Read two tokens to populate both currTok and peekTok
 	p.nextToken()
 	p.nextToken()
 	return p
@@ -42,7 +41,6 @@ func (p *Parser) parseStatement() (core.Statement, error) {
 
 	switch p.currTok.Type {
 	case TokenCreate:
-		// Look ahead: is the next token INDEX?
 		if p.peekTok.Type == TokenIndex {
 			return p.parseCreateIndex()
 		}
@@ -51,10 +49,17 @@ func (p *Parser) parseStatement() (core.Statement, error) {
 		return p.parseInsert()
 	case TokenSelect:
 		return p.parseSelect()
-	case TokenDelete: // <--- ADD THIS CASE
+	case TokenDelete:
 		return p.parseDelete()
 	case TokenUpdate:
 		return p.parseUpdate()
+	// NEW: Transaction control statements
+	case TokenBegin, TokenStart:
+		return p.parseBegin()
+	case TokenCommit, TokenEnd:
+		return p.parseCommit()
+	case TokenRollback:
+		return p.parseRollback()
 	default:
 		return nil, fmt.Errorf("unexpected statement starting with %q", p.currTok.Value)
 	}
@@ -82,7 +87,6 @@ func (p *Parser) parseCreateTable() (core.Statement, error) {
 
 	var columns []core.Column
 
-	// Parse column definitions comma-separated list
 	for {
 		if p.currTok.Type != TokenIdentifier {
 			return nil, fmt.Errorf("expected column name, got %q", p.currTok.Value)
@@ -106,7 +110,7 @@ func (p *Parser) parseCreateTable() (core.Statement, error) {
 		columns = append(columns, core.Column{Name: colName, Type: colType})
 
 		if p.currTok.Type == TokenComma {
-			p.nextToken() // consume ',' and keep looping
+			p.nextToken()
 			continue
 		}
 		break
@@ -127,7 +131,6 @@ func (p *Parser) parseCreateTable() (core.Statement, error) {
 	}, nil
 }
 
-// parseInsert handles: INSERT INTO <table_name> VALUES (val1, val2, ...)
 // parseInsert handles: INSERT INTO <table_name> VALUES (val1, val2, ...)
 func (p *Parser) parseInsert() (core.Statement, error) {
 	p.nextToken() // consume INSERT
@@ -155,14 +158,12 @@ func (p *Parser) parseInsert() (core.Statement, error) {
 
 	var values []core.Expr
 
-	// Parse comma-separated value expressions
 	for {
 		expr, err := p.parsePrimaryExpr()
 		if err != nil {
 			return nil, err
 		}
 
-		// --- FIX: Ensure the expression is strictly a literal, not a column reference ---
 		if _, ok := expr.(*core.Literal); !ok {
 			return nil, fmt.Errorf("INSERT values must be constant literals, got identifier or expression")
 		}
@@ -170,7 +171,7 @@ func (p *Parser) parseInsert() (core.Statement, error) {
 		values = append(values, expr)
 
 		if p.currTok.Type == TokenComma {
-			p.nextToken() // consume ',' and keep looping
+			p.nextToken()
 			continue
 		}
 		break
@@ -195,7 +196,6 @@ func (p *Parser) parseInsert() (core.Statement, error) {
 func (p *Parser) parseSelect() (core.Statement, error) {
 	p.nextToken() // consume SELECT
 
-	// 1. Parse Projection List (Columns or '*')
 	var projection []core.Expr
 	if p.currTok.Type == TokenStar {
 		projection = append(projection, &core.Star{})
@@ -209,14 +209,13 @@ func (p *Parser) parseSelect() (core.Statement, error) {
 			projection = append(projection, expr)
 
 			if p.currTok.Type == TokenComma {
-				p.nextToken() // consume ','
+				p.nextToken()
 				continue
 			}
 			break
 		}
 	}
 
-	// 2. Parse FROM Clause
 	if p.currTok.Type != TokenFrom {
 		return nil, fmt.Errorf("expected FROM clause, got %q", p.currTok.Value)
 	}
@@ -228,7 +227,6 @@ func (p *Parser) parseSelect() (core.Statement, error) {
 	fromTable := p.currTok.Value
 	p.nextToken() // consume table name
 
-	// 3. Phase 2: Parse Optional JOIN Clause
 	var joinClause *core.JoinClause
 	if p.currTok.Type == TokenJoin {
 		p.nextToken() // consume JOIN
@@ -255,7 +253,6 @@ func (p *Parser) parseSelect() (core.Statement, error) {
 		}
 	}
 
-	// 4. Parse Optional WHERE Clause
 	var whereExpr core.Expr
 	if p.currTok.Type == TokenWhere {
 		p.nextToken() // consume WHERE
@@ -273,12 +270,12 @@ func (p *Parser) parseSelect() (core.Statement, error) {
 	return &core.SelectStmt{
 		Projection: projection,
 		From:       fromTable,
-		Join:       joinClause, // Populated here!
+		Join:       joinClause,
 		Where:      whereExpr,
 	}, nil
 }
 
-// --- Phase 2 Expression Parsing Engine with Precedence ---
+// --- Expression Parsing ---
 
 func (p *Parser) parseExpression() (core.Expr, error) {
 	return p.parseOr()
@@ -317,7 +314,7 @@ func (p *Parser) parseAnd() (core.Expr, error) {
 }
 
 func (p *Parser) parseComparison() (core.Expr, error) {
-	left, err := p.parseAdditive() // Phase 2: routes to arithmetic next
+	left, err := p.parseAdditive()
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +345,6 @@ func (p *Parser) parseComparison() (core.Expr, error) {
 	return &core.BinaryExpr{Op: op, Left: left, Right: right}, nil
 }
 
-// parseAdditive handles Phase 2 arithmetic: + and -
 func (p *Parser) parseAdditive() (core.Expr, error) {
 	left, err := p.parsePrimaryExpr()
 	if err != nil {
@@ -362,7 +358,7 @@ func (p *Parser) parseAdditive() (core.Expr, error) {
 		} else {
 			op = core.OpSub
 		}
-		p.nextToken() // consume + or -
+		p.nextToken()
 
 		right, err := p.parsePrimaryExpr()
 		if err != nil {
@@ -373,29 +369,26 @@ func (p *Parser) parseAdditive() (core.Expr, error) {
 	return left, nil
 }
 
-// parsePrimaryExpr parses basic units including table-qualified columns (e.g., users.id)
 func (p *Parser) parsePrimaryExpr() (core.Expr, error) {
 	switch p.currTok.Type {
 	case TokenIdentifier:
 		nameOrTable := p.currTok.Value
-		p.nextToken() // consume identifier
+		p.nextToken()
 
-		// Phase 2 Check: If followed by a '.', this is a qualified reference: table.column
 		if p.currTok.Type == TokenDot {
-			p.nextToken() // consume '.'
+			p.nextToken()
 			if p.currTok.Type != TokenIdentifier {
 				return nil, fmt.Errorf("expected column identifier after '.', got %q", p.currTok.Value)
 			}
 			colName := p.currTok.Value
-			p.nextToken() // consume column identifier
+			p.nextToken()
 
 			return &core.ColumnRef{
-				Table: nameOrTable, // Maps to the table string property in core.ColumnRef
+				Table: nameOrTable,
 				Name:  colName,
 			}, nil
 		}
 
-		// Unqualified column fallback (Phase 1)
 		return &core.ColumnRef{Table: "", Name: nameOrTable}, nil
 
 	case TokenIntLiteral:
@@ -412,13 +405,12 @@ func (p *Parser) parsePrimaryExpr() (core.Expr, error) {
 		return &core.Literal{Value: core.NewText(text)}, nil
 
 	case TokenTrue:
-		p.nextToken() // consume true
+		p.nextToken()
 		return &core.Literal{Value: core.NewBool(true)}, nil
 
 	case TokenFalse:
-		p.nextToken()                                         // consume false
-		return &core.Literal{Value: core.NewBool(false)}, nil // standard core pattern:
-		// return &core.Literal{Value: core.NewBool(false)}, nil
+		p.nextToken()
+		return &core.Literal{Value: core.NewBool(false)}, nil
 
 	default:
 		return nil, fmt.Errorf("expected expression primary element, got %q", p.currTok.Value)
@@ -477,7 +469,6 @@ func (p *Parser) parseUpdate() (core.Statement, error) {
 
 	var assignments []core.Assignment
 
-	// Parse comma-separated col = expr pairs
 	for {
 		if p.currTok.Type != TokenIdentifier {
 			return nil, fmt.Errorf("expected column identifier in SET clause, got %q", p.currTok.Value)
@@ -501,7 +492,7 @@ func (p *Parser) parseUpdate() (core.Statement, error) {
 		})
 
 		if p.currTok.Type == TokenComma {
-			p.nextToken() // consume ',' and parse next assignment
+			p.nextToken()
 			continue
 		}
 		break
@@ -534,7 +525,6 @@ func (p *Parser) parseCreateIndex() (core.Statement, error) {
 	p.nextToken() // consume INDEX
 
 	var indexName string
-	// If the next token isn't ON, it must be the optional index name
 	if p.currTok.Type != TokenOn {
 		if p.currTok.Type != TokenIdentifier {
 			return nil, fmt.Errorf("expected index name or ON keyword, got %q", p.currTok.Value)
@@ -579,4 +569,59 @@ func (p *Parser) parseCreateIndex() (core.Statement, error) {
 		Table:  tableName,
 		Column: columnName,
 	}, nil
+}
+
+// ============================================================
+// NEW: Transaction Control Statement Parsers
+// ============================================================
+
+// parseBegin handles: BEGIN [TRANSACTION] or START TRANSACTION
+func (p *Parser) parseBegin() (core.Statement, error) {
+	// BEGIN or START already consumed in parseStatement
+	p.nextToken() // move to next token
+
+	// Optionally consume TRANSACTION
+	if p.currTok.Type == TokenTransaction {
+		p.nextToken() // consume TRANSACTION
+	}
+
+	if p.currTok.Type != TokenEOF {
+		return nil, fmt.Errorf("unexpected tokens after BEGIN/START: %q", p.currTok.Value)
+	}
+
+	return &core.BeginStmt{}, nil
+}
+
+// parseCommit handles: COMMIT [TRANSACTION] or END
+func (p *Parser) parseCommit() (core.Statement, error) {
+	// COMMIT or END already consumed in parseStatement
+	p.nextToken() // move to next token
+
+	// Optionally consume TRANSACTION
+	if p.currTok.Type == TokenTransaction {
+		p.nextToken() // consume TRANSACTION
+	}
+
+	if p.currTok.Type != TokenEOF {
+		return nil, fmt.Errorf("unexpected tokens after COMMIT/END: %q", p.currTok.Value)
+	}
+
+	return &core.CommitStmt{}, nil
+}
+
+// parseRollback handles: ROLLBACK [TRANSACTION]
+func (p *Parser) parseRollback() (core.Statement, error) {
+	// ROLLBACK already consumed in parseStatement
+	p.nextToken() // move to next token
+
+	// Optionally consume TRANSACTION
+	if p.currTok.Type == TokenTransaction {
+		p.nextToken() // consume TRANSACTION
+	}
+
+	if p.currTok.Type != TokenEOF {
+		return nil, fmt.Errorf("unexpected tokens after ROLLBACK: %q", p.currTok.Value)
+	}
+
+	return &core.RollbackStmt{}, nil
 }
