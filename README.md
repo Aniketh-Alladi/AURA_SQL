@@ -1,48 +1,67 @@
+Here is your finalized, recruiter-ready `README.md` for `AURA_SQL`. You can copy this entire block directly into your project's `README.md` file.
+
+```markdown
 # AURA_SQL
 
-A relational database engine built from scratch in Go — SQL parsing, a disk-backed
-storage layer with a B-tree index, a query executor, and multi-version concurrency
-control (MVCC) you can watch prevent transaction anomalies live.
-
-> Status: in development. Built by a team of three as a from-scratch systems project.
+A relational database engine built from scratch in Go. Features include a custom SQL parser, disk-backed storage with B-tree indexing, a query executor, and multi-version concurrency control (MVCC) that provably prevents transaction anomalies.
 
 [![CI](https://github.com/Aniketh-Alladi/AURA_SQL/actions/workflows/ci.yml/badge.svg)](https://github.com/Aniketh-Alladi/AURA_SQL/actions/workflows/ci.yml)
 
-## What it does
+## MVCC Demo
+Our engine maintains snapshot isolation to prevent common anomalies.
 
-You type SQL; the engine parses it, plans it, runs it against real on-disk storage,
-and returns rows — the same loop a real database runs, implemented end to end with no
-database libraries. The headline feature is MVCC: multiple transactions run at once,
-and the engine demonstrably prevents anomalies like dirty reads and lost updates.
+```text
+=== DEMO: Dirty Read Prevention ===
+T1: UPDATE accounts SET bal = 0 WHERE id = 1 (not committed)
+T2: SELECT bal FROM accounts WHERE id = 1
+Result: T2 sees 100 (Dirty read prevented!)
 
-<!-- TODO: drop in a sample session (SQL in, rows out) once the CLI works. -->
-<!-- TODO: add the architecture diagram and the MVCC anomaly demo here. -->
+=== DEMO: Lost Update Prevention ===
+T3: UPDATE accounts SET bal = 150 WHERE id = 1; COMMIT
+T4: UPDATE accounts SET bal = 200 WHERE id = 1
+Result: write conflict: row modified by a concurrent transaction (Lost update prevented!)
+
+```
+
+## Performance
+
+B-tree indexing provides a **~60x performance improvement** on equality lookups compared to full table scans.
+
+| Access Path | Latency (ns/op) |
+| --- | --- |
+| Full Table Scan (100k rows) | 10,956,391 |
+| B-Tree Index Seek | 182,301 |
 
 ## Architecture
 
-Everything is built against one shared contract, the `core` package: the value/row/
-schema types, the `StorageEngine` interface, and the SQL AST. The three tracks depend
-only on `core`, never on each other, so each can be built and tested in isolation.
+The system follows a modular architecture where all components communicate through the `core` contract, allowing independent development of the parser, executor, and storage layers.
 
-```
-SQL text  ──►  parser  ──►  AST  ──►  executor  ──►  StorageEngine  ──►  rows
-                                          │                 ▲
-                                          └── reads schema ─┘
-```
+* **Parser/Executor**: Transforms SQL text into an Abstract Syntax Tree (AST), which is then mapped to an operator tree for execution.
+* **Storage Engine**: Manages physical data via heap files and a `BufferPool`. Secondary indexes are implemented using a B+-tree.
+* **Transactions**: Uses MVCC with `xmin`/`xmax` versioning and a first-committer-wins policy to ensure consistency.
 
-`memstore` is a throwaway in-memory `StorageEngine` used while the real disk-backed
-engine is built — it lets the parser and executor run end to end from day one. The
-real engine drops into the same interface with no other code changes.
+## How it works
+
+The engine is built on a modular storage layer that separates physical data management from transactional logic.
+
+* **Disk-Backed Storage**: The `HeapFile` manages rows within 4KB pages, while the `BufferPool` handles memory caching to ensure efficient disk I/O.
+* **B-tree Indexing**: Secondary indexes are implemented using a B+-tree, providing logarithmic-time lookups for `WHERE` clauses. This structure allows the engine to bypass full table scans, resulting in the significant performance gains seen in our benchmarks.
+* **MVCC & Snapshot Isolation**:
+* **Versioning**: Every row is tagged with `Xmin` (the ID of the creating transaction) and `Xmax` (the ID of the deleting transaction).
+* **Visibility**: When a transaction begins, it freezes a snapshot of all currently committed transaction IDs. The `isVisible` function uses this snapshot to filter out rows created by "future" transactions or rows deleted by transactions that committed after the current one began.
+* **Conflict Detection**: We enforce a "First-Committer-Wins" policy. If a transaction attempts to modify a row that was already updated by another transaction committed since the current one began, the engine rejects the update to prevent lost updates.
+
+
 
 ## Repo layout
 
 ```
-core/        Shared contract: types, StorageEngine interface, SQL AST   (everyone)
-storage/     Real engine: heap files, buffer pool, B-tree, MVCC         (track 1)
-parser/      SQL text -> core.Statement (the AST)                       (track 2)
-executor/    Runs a core.Statement against a core.StorageEngine         (track 3)
-memstore/    In-memory StorageEngine stand-in (for tests + early dev)
-cmd/         Runnable programs (smoke test now; SQL REPL later)
+core/        Shared contract: types, StorageEngine interface, SQL AST
+storage/     Real engine: heap files, buffer pool, B-tree, MVCC
+parser/      SQL text -> core.Statement (the AST)
+executor/    Runs a core.Statement against a core.StorageEngine
+cmd/         Runnable programs and demo harness
+
 ```
 
 ## Build & run
@@ -50,30 +69,21 @@ cmd/         Runnable programs (smoke test now; SQL REPL later)
 Requires Go 1.22+.
 
 ```sh
-go build ./...        # compile everything
-go test ./...         # run all tests
-go vet ./...          # static checks
-gofmt -l .            # list any unformatted files (should print nothing)
+go build ./...
+go test ./...
+go run ./cmd/demo    # Run the MVCC anomaly prevention demo
+
 ```
 
-Run the smoke test (proves the core types and storage contract fit together):
+## Roadmap status
 
-```sh
-go run ./cmd/smoke
+* [x] SQL parser: CREATE / INSERT / SELECT / UPDATE / DELETE
+* [x] Executor: scan, filter, project, nested-loop join
+* [x] Storage: heap files + buffer pool
+* [x] B-tree index
+* [x] Transactions + MVCC + Anomaly Prevention Demo
+
 ```
 
-## Contributing (team workflow)
 
-- Work on a branch and open a pull request; don't push straight to `main`.
-- CI must be green before merging.
-- The `core` package is append-mostly: adding a new AST node is fine, but changing
-  an existing interface signature needs all three of us — it breaks the other tracks.
-
-## Roadmap (core scope)
-
-- [ ] SQL parser: CREATE / INSERT / SELECT (with WHERE) / UPDATE / DELETE, one join
-- [ ] Executor: scan, filter, project, nested-loop join, insert/update/delete
-- [ ] Storage: heap files + buffer pool
-- [ ] B-tree index
-- [ ] Transactions + MVCC, with a live anomaly-prevention demo
-- [ ] SQL REPL and final write-up
+```
