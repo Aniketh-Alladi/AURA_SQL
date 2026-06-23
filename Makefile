@@ -1,9 +1,8 @@
-.PHONY: build clean test run-aura run-demo run-smoke
+.PHONY: build clean test run-aura run-demo
 
 build:
 	go build -o bin/aura ./cmd/aura
 	go build -o bin/demo ./cmd/demo
-	go build -o bin/smoke ./cmd/smoke
 
 clean:
 	rm -rf bin/ ./data ./demo_data
@@ -17,9 +16,6 @@ run-aura: build
 
 run-demo: build
 	./bin/demo
-
-run-smoke: build
-	./bin/smoke
 
 fmt:
 	gofmt -w .

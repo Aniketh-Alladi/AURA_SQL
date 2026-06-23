@@ -10,7 +10,7 @@ func BenchmarkScanVsIndex(b *testing.B) {
 	dir, _ := os.MkdirTemp("", "bench-")
 	defer os.RemoveAll(dir)
 	eng, _ := New(dir)
-	
+
 	// Seed 100k rows
 	txn, _ := eng.Begin()
 	eng.CreateTable(txn, "bench", core.Schema{Columns: []core.Column{{Name: "id", Type: core.TypeInt}}})
@@ -27,7 +27,9 @@ func BenchmarkScanVsIndex(b *testing.B) {
 			it, _ := eng.Scan(t, "bench")
 			for {
 				_, _, ok, _ := it.Next()
-				if !ok { break }
+				if !ok {
+					break
+				}
 			}
 			t.Commit()
 		}
