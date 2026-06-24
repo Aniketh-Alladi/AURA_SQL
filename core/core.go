@@ -208,6 +208,10 @@ type StorageEngine interface {
 	CreateIndex(txn Txn, table, column string) error
 	HasIndex(table, column string) bool
 	SeekIndex(txn Txn, table, column string, key Value) (RowIterator, error)
+
+
+	Analyze(txn Txn, table string) error
+    Stats(table string) (TableStats, bool)
 }
 
 // ============================================================
@@ -360,4 +364,16 @@ type Result struct {
 	Schema       Schema
 	Rows         []Row
 	RowsAffected int
+}
+
+type ColumnStats struct { 
+    DistinctCount int64
+    NullCount     int64
+    Min           Value
+    Max           Value 
+}
+
+type TableStats struct { 
+    RowCount int64
+    Columns  map[string]ColumnStats 
 }

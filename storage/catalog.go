@@ -15,7 +15,8 @@ type TableMetadata struct {
 	Name       string
 	Schema     core.Schema
 	HeapFile   *HeapFile
-	IndexRoots map[string]int // Tracks our B-Tree Root Pages
+	IndexRoots map[string]int
+	Stats      *core.TableStats
 }
 
 // Catalog tracks all tables currently existing in the database.
