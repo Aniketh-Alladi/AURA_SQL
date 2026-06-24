@@ -12,6 +12,7 @@ type Parser struct {
 	lexer   *Lexer
 	currTok Token
 	peekTok Token
+	prevTok Token
 }
 
 // NewParser initializes a parser with a given SQL string.
@@ -23,6 +24,7 @@ func NewParser(sql string) *Parser {
 }
 
 func (p *Parser) nextToken() {
+	p.prevTok = p.currTok
 	p.currTok = p.peekTok
 	p.peekTok = p.lexer.NextToken()
 }
@@ -53,16 +55,21 @@ func (p *Parser) parseStatement() (core.Statement, error) {
 		return p.parseDelete()
 	case TokenUpdate:
 		return p.parseUpdate()
-	// NEW: Transaction control statements
 	case TokenBegin, TokenStart:
 		return p.parseBegin()
 	case TokenCommit, TokenEnd:
 		return p.parseCommit()
 	case TokenRollback:
 		return p.parseRollback()
-	default:
-		return nil, fmt.Errorf("unexpected statement starting with %q", p.currTok.Value)
+
+		// ADD THESE TWO CASES HERE:
+	case TokenExplain:
+		return p.parseExplain()
+	case TokenAnalyze:
+		return p.parseAnalyze()
 	}
+
+	return nil, fmt.Errorf("unexpected statement starting with %q", p.currTok.Value)
 }
 
 // parseCreateTable handles: CREATE TABLE <table_name> (col1 TYPE, col2 TYPE, ...)
@@ -196,83 +203,123 @@ func (p *Parser) parseInsert() (core.Statement, error) {
 func (p *Parser) parseSelect() (core.Statement, error) {
 	p.nextToken() // consume SELECT
 
-	var projection []core.Expr
-	if p.currTok.Type == TokenStar {
-		projection = append(projection, &core.Star{})
-		p.nextToken()
-	} else {
-		for {
-			expr, err := p.parseExpression()
-			if err != nil {
-				return nil, err
-			}
-			projection = append(projection, expr)
-
-			if p.currTok.Type == TokenComma {
-				p.nextToken()
-				continue
-			}
-			break
-		}
+	// 1. Parse Select Expressions/Projection Columns
+	projection, err := p.parseSelectExpressions()
+	if err != nil {
+		return nil, err
 	}
 
-	if p.currTok.Type != TokenFrom {
-		return nil, fmt.Errorf("expected FROM clause, got %q", p.currTok.Value)
+	// 2. Consume FROM keyword
+	if !p.match(TokenFrom) {
+		return nil, fmt.Errorf("expected FROM keyword, got %q", p.currTok.Value)
 	}
-	p.nextToken() // consume FROM
 
+	// 3. Parse Base Table Name
 	if p.currTok.Type != TokenIdentifier {
-		return nil, fmt.Errorf("expected table name in FROM clause, got %q", p.currTok.Value)
+		return nil, fmt.Errorf("expected table name after FROM, got %q", p.currTok.Value)
 	}
 	fromTable := p.currTok.Value
-	p.nextToken() // consume table name
+	p.nextToken() // consume table identifier
 
-	var joinClause *core.JoinClause
-	if p.currTok.Type == TokenJoin {
+	// 4. Parse Optional Base Table Alias (e.g., "FROM users u")
+	var fromAlias string
+	if p.currTok.Type == TokenIdentifier && p.currTok.Value != "JOIN" && p.currTok.Value != "WHERE" {
+		fromAlias = p.currTok.Value
+		p.nextToken() // consume alias identifier
+	}
+
+	// 5. Parse Multiple Chainable JOIN clauses
+	var joins []core.JoinClause
+	for p.currTok.Type == TokenJoin {
 		p.nextToken() // consume JOIN
 
 		if p.currTok.Type != TokenIdentifier {
 			return nil, fmt.Errorf("expected table name after JOIN, got %q", p.currTok.Value)
 		}
 		joinTable := p.currTok.Value
-		p.nextToken() // consume join table name
+		p.nextToken() // consume join table identifier
 
-		if p.currTok.Type != TokenOn {
-			return nil, fmt.Errorf("expected ON keyword after JOIN table, got %q", p.currTok.Value)
+		// Optional Join Table Alias (e.g., "JOIN orders o ON ...")
+		var joinAlias string
+		if p.currTok.Type == TokenIdentifier && p.currTok.Value != "ON" {
+			joinAlias = p.currTok.Value
+			p.nextToken() // consume join alias identifier
 		}
-		p.nextToken() // consume ON
 
+		if !p.match(TokenOn) {
+			return nil, fmt.Errorf("expected ON keyword after JOIN table/alias, got %q", p.currTok.Value)
+		}
+
+		// Parse the join predicate expression
 		onExpr, err := p.parseExpression()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed parsing JOIN condition: %w", err)
 		}
 
-		joinClause = &core.JoinClause{
+		joins = append(joins, core.JoinClause{
 			Table: joinTable,
+			Alias: joinAlias, // If your core.JoinClause contains an Alias field, map it here
 			On:    onExpr,
-		}
+		})
 	}
 
+	// 6. Parse WHERE clause
 	var whereExpr core.Expr
-	if p.currTok.Type == TokenWhere {
-		p.nextToken() // consume WHERE
-		var err error
-		whereExpr, err = p.parseExpression()
+	if p.match(TokenWhere) {
+		expr, err := p.parseExpression()
 		if err != nil {
 			return nil, err
 		}
+		whereExpr = expr
 	}
 
 	if p.currTok.Type != TokenEOF {
-		return nil, fmt.Errorf("unexpected trailing tokens after SELECT statement: %q", p.currTok.Value)
+		return nil, fmt.Errorf("unexpected token at end of SELECT statement: %q", p.currTok.Value)
 	}
 
 	return &core.SelectStmt{
 		Projection: projection,
 		From:       fromTable,
-		Join:       joinClause,
+		FromAlias:  fromAlias,
+		Joins:      joins,
 		Where:      whereExpr,
 	}, nil
+}
+
+// parseSelectExpressions parses the projection list after SELECT (e.g., *, or name, id, age+1)
+func (p *Parser) parseSelectExpressions() ([]core.Expr, error) {
+	var exprs []core.Expr
+
+	// Check for a wildcard star select: SELECT *
+	if p.currTok.Type == TokenStar {
+		exprs = append(exprs, &core.Star{})
+		p.nextToken() // consume *
+		return exprs, nil
+	}
+
+	// Otherwise, it's a comma-separated list of expressions
+	for {
+		expr, err := p.parseExpression()
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse select expression: %w", err)
+		}
+		exprs = append(exprs, expr)
+
+		// If the next token is a comma, consume it and continue loop
+		if p.currTok.Type == TokenComma {
+			p.nextToken() // consume ,
+			continue
+		}
+
+		// No more commas? Break out
+		break
+	}
+
+	if len(exprs) == 0 {
+		return nil, fmt.Errorf("expected at least one select expression or '*'")
+	}
+
+	return exprs, nil
 }
 
 // --- Expression Parsing ---
@@ -572,7 +619,7 @@ func (p *Parser) parseCreateIndex() (core.Statement, error) {
 }
 
 // ============================================================
-// NEW: Transaction Control Statement Parsers
+// 5. Transaction & Utility Parsers
 // ============================================================
 
 // parseBegin handles: BEGIN [TRANSACTION] or START TRANSACTION
@@ -624,4 +671,54 @@ func (p *Parser) parseRollback() (core.Statement, error) {
 	}
 
 	return &core.RollbackStmt{}, nil
+}
+
+// parseExplain handles: EXPLAIN <statement>
+func (p *Parser) parseExplain() (core.Statement, error) {
+	p.nextToken() // consume EXPLAIN
+
+	// Recursively parse the query statement that follows EXPLAIN
+	subStmt, err := p.parseStatement()
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse statement for EXPLAIN: %w", err)
+	}
+	return &core.ExplainStmt{Stmt: subStmt}, nil
+}
+
+// parseAnalyze handles: ANALYZE <table> or ANALYZE TABLE <table>
+// parseAnalyze handles: ANALYZE <table> or ANALYZE TABLE <table>
+func (p *Parser) parseAnalyze() (core.Statement, error) {
+	p.nextToken() // consume ANALYZE
+
+	// FIX: Check for TokenTable instead of TokenIdentifier
+	if p.currTok.Type == TokenTable {
+		p.nextToken() // consume TABLE keyword
+	}
+
+	if p.currTok.Type != TokenIdentifier {
+		return nil, fmt.Errorf("expected table name after ANALYZE, got %q", p.currTok.Value)
+	}
+
+	tableName := p.currTok.Value
+	p.nextToken() // consume table name
+
+	if p.currTok.Type != TokenEOF {
+		return nil, fmt.Errorf("unexpected token at end of ANALYZE statement: %q", p.currTok.Value)
+	}
+
+	return &core.AnalyzeStmt{Table: tableName}, nil
+}
+
+// match checks if the current token is of the given type, and if so, advances.
+func (p *Parser) match(typ TokenType) bool {
+	if p.currTok.Type == typ {
+		p.nextToken()
+		return true
+	}
+	return false
+}
+
+// previous returns the token before the current one.
+func (p *Parser) previous() Token {
+	return p.prevTok
 }

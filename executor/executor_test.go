@@ -373,12 +373,14 @@ func TestJoin(t *testing.T) {
 			&core.ColumnRef{Name: "product"},
 		},
 		From: "users",
-		Join: &core.JoinClause{
-			Table: "orders",
-			On: &core.BinaryExpr{
-				Op:    core.OpEq,
-				Left:  &core.ColumnRef{Name: "id"},
-				Right: &core.ColumnRef{Name: "user_id"},
+		Joins: []core.JoinClause{
+			{
+				Table: "orders",
+				On: &core.BinaryExpr{
+					Op:    core.OpEq,
+					Left:  &core.ColumnRef{Name: "id"},
+					Right: &core.ColumnRef{Name: "user_id"},
+				},
 			},
 		},
 		Where: nil,
@@ -454,12 +456,14 @@ func TestJoinWithWhere(t *testing.T) {
 			&core.ColumnRef{Name: "price"},
 		},
 		From: "users",
-		Join: &core.JoinClause{
-			Table: "orders",
-			On: &core.BinaryExpr{
-				Op:    core.OpEq,
-				Left:  &core.ColumnRef{Name: "id"},
-				Right: &core.ColumnRef{Name: "user_id"},
+		Joins: []core.JoinClause{
+			{
+				Table: "orders",
+				On: &core.BinaryExpr{
+					Op:    core.OpEq,
+					Left:  &core.ColumnRef{Name: "id"},
+					Right: &core.ColumnRef{Name: "user_id"},
+				},
 			},
 		},
 		Where: &core.BinaryExpr{
@@ -723,12 +727,14 @@ func usersOrdersJoinStmt() *core.SelectStmt {
 			&core.ColumnRef{Name: "product"},
 		},
 		From: "users",
-		Join: &core.JoinClause{
-			Table: "orders",
-			On: &core.BinaryExpr{
-				Op:    core.OpEq,
-				Left:  &core.ColumnRef{Name: "id"},
-				Right: &core.ColumnRef{Name: "user_id"},
+		Joins: []core.JoinClause{
+			{
+				Table: "orders",
+				On: &core.BinaryExpr{
+					Op:    core.OpEq,
+					Left:  &core.ColumnRef{Name: "id"},
+					Right: &core.ColumnRef{Name: "user_id"},
+				},
 			},
 		},
 	}

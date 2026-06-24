@@ -22,6 +22,8 @@ const (
 	TokenInsert
 	TokenInto
 	TokenValues
+	TokenAnalyze
+	TokenExplain
 	TokenAnd
 	TokenOr
 	TokenIntType
@@ -322,6 +324,10 @@ func (l *Lexer) readIdentifierOrKeyword() Token {
 		return Token{Type: TokenSet, Value: val}
 	case "JOIN":
 		return Token{Type: TokenJoin, Value: val}
+	case "EXPLAIN":
+		return Token{Type: TokenExplain, Value: val}
+	case "ANALYZE":
+		return Token{Type: TokenAnalyze, Value: val}
 	case "ON":
 		return Token{Type: TokenOn, Value: val}
 	case "INDEX":

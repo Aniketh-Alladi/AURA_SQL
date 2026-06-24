@@ -242,17 +242,18 @@ type InsertStmt struct {
 }
 
 // SelectStmt: SELECT <Projection> FROM <From> [JOIN ...] [WHERE ...].
-// A Projection of exactly one *Star means SELECT *.
 type SelectStmt struct {
 	Projection []Expr
 	From       string
-	Join       *JoinClause // nil if absent; core scope allows at most one
-	Where      Expr        // nil if absent
+	FromAlias  string       // Added: Optional alias for the primary table (e.g., "FROM users u")
+	Joins      []JoinClause // Changed: slice instead of single pointer to support chained JOINs
+	Where      Expr         // nil if absent
 }
 
-// JoinClause: JOIN <Table> ON <On>.
+// JoinClause: JOIN <Table> [Alias] ON <On>.
 type JoinClause struct {
 	Table string
+	Alias string // Added: Optional alias for the joined table (e.g., "JOIN orders o")
 	On    Expr
 }
 
@@ -376,3 +377,18 @@ type TableStats struct {
 	RowCount int64
 	Columns  map[string]ColumnStats
 }
+
+// ---- Explain / Analyze ----
+
+// ExplainStmt represents EXPLAIN <statement>.
+type ExplainStmt struct {
+	Stmt Statement
+}
+
+// AnalyzeStmt represents ANALYZE <table>.
+type AnalyzeStmt struct {
+	Table string
+}
+
+func (*ExplainStmt) isStatement() {}
+func (*AnalyzeStmt) isStatement() {}
