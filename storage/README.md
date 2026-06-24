@@ -25,6 +25,13 @@ The engine implements **Multi-Version Concurrency Control (MVCC)** to allow conc
 * **Write-Conflict Detection (`checkWriteConflict`)**:
     - Implements a "First-Committer-Wins" policy. If a transaction attempts to modify a row that has been updated or deleted by another transaction committed after the current one began, the engine returns a `write conflict` error to prevent lost updates.
 
+## Statistics Subsystem
+
+The engine includes an `Analyze` subsystem used by the optimizer to make cost-based decisions.
+* **`Analyze(txn, table)`**: Performs a full scan of the table to compute `RowCount`, `DistinctCount` (NDV), `NullCount`, and `Min`/`Max` per column.
+* **`Stats(table)`**: Provides a read-only view of the latest computed table statistics.
+* **Usage**: Users or the optimizer should trigger `ANALYZE` after large data loads to ensure query plans are accurate.
+
 ## Implementation Details
 - **Tombstones**: Deleted rows are not removed physically; instead, they are logically marked via `Xmax` (setting length to 0).
 - **Index Builds**: The `CreateIndex` operation performs a raw scan (ignoring MVCC visibility) to ensure all physical rows are indexed, and then the engine maintains index integrity during `Insert` and `Update` operations.
