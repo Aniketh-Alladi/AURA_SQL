@@ -1,6 +1,4 @@
-Here is your finalized, recruiter-ready `README.md` for `AURA_SQL`. You can copy this entire block directly into your project's `README.md` file.
 
-```markdown
 # AURA_SQL
 
 A relational database engine built from scratch in Go. Features include a custom SQL parser, disk-backed storage with B-tree indexing, a query executor, and multi-version concurrency control (MVCC) that provably prevents transaction anomalies.
@@ -51,6 +49,14 @@ The engine is built on a modular storage layer that separates physical data mana
 * **Visibility**: When a transaction begins, it freezes a snapshot of all currently committed transaction IDs. The `isVisible` function uses this snapshot to filter out rows created by "future" transactions or rows deleted by transactions that committed after the current one began.
 * **Conflict Detection**: We enforce a "First-Committer-Wins" policy. If a transaction attempts to modify a row that was already updated by another transaction committed since the current one began, the engine rejects the update to prevent lost updates.
 
+
+## Phase 6: Cost-Based Optimizer (Extension)
+
+To facilitate advanced query optimization, AURA_SQL now includes a statistics subsystem:
+
+* **`ANALYZE`**: Scans table data to compute per-column row counts, distinct value counts (NDV), null counts, and min/max values.
+* **Cost-Based Decisions**: The optimizer uses these statistics to estimate query costs, most notably allowing for intelligent join-order reordering to minimize intermediate result sizes.
+* **Benchmark Harness**: Includes automated seeding and benchmark tools in `main.go` to measure query latency improvements, proving the efficacy of cost-based planning over naive execution.
 
 
 ## Repo layout
