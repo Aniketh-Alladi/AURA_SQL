@@ -16,6 +16,23 @@ func main() {
 	eng, _ := storage.New(dir)
 	defer eng.Close()
 
+	// --- NEW: Run Benchmark Seeding ---
+	fmt.Println("Seeding benchmark data...")
+	seedTxn, _ := eng.Begin()
+
+	// Create tables first
+	tryExec(eng, seedTxn, "CREATE TABLE customers (id INT, name TEXT)")
+	tryExec(eng, seedTxn, "CREATE TABLE products (id INT, name TEXT, price INT)")
+	tryExec(eng, seedTxn, "CREATE TABLE orders (id INT, customer_id INT, product_id INT)")
+
+	seedData(eng, seedTxn)
+
+	if err := seedTxn.Commit(); err != nil {
+		fmt.Printf("Seeding failed: %v\n", err)
+	} else {
+		fmt.Println("Seeding complete and committed.")
+	}
+
 	// 1. Setup Table
 	txn, _ := eng.Begin()
 	tryExec(eng, txn, "CREATE TABLE accounts (id INT, bal INT)")
@@ -71,3 +88,23 @@ func execQuery(eng core.StorageEngine, txn core.Txn, sql string) (core.Result, e
 }
 
 func banner(s string) { fmt.Printf("\n=== %s ===\n", s) }
+
+func seedData(eng core.StorageEngine, txn core.Txn) {
+	// 1. Run CREATE TABLEs
+	// 2. Run INSERTs (programmatically or by parsing the SQL above)
+	// 3. Run ANALYZE for customers, products, and orders
+
+	for i := 4; i <= 10000; i++ {
+		customerID := (i % 3) + 1
+		productID := 101 + (i % 2)
+		eng.Insert(txn, "orders", core.Row{Values: []core.Value{core.NewInt(int64(i)), core.NewInt(int64(customerID)), core.NewInt(int64(productID))}})
+	}
+
+	eng.Analyze(txn, "customers")
+	eng.Analyze(txn, "products")
+	eng.Analyze(txn, "orders")
+
+	stats, _ := eng.Stats("orders")
+	fmt.Printf("Orders table analyzed: %d rows\n", stats.RowCount)
+
+}
