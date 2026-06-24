@@ -429,3 +429,13 @@ func (it *memstoreIndexIterator) Next() (core.RowID, core.Row, bool, error) {
 func (it *memstoreIndexIterator) Close() error {
 	return it.base.Close()
 }
+
+func (e *Engine) Analyze(txn core.Txn, table string) error {
+	// No-op for memstore, or implement basic counting if you have time
+	return nil
+}
+
+func (e *Engine) Stats(table string) (core.TableStats, bool) {
+	// Return empty stats, false to indicate no stats available yet
+	return core.TableStats{}, false
+}

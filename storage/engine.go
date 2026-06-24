@@ -651,3 +651,81 @@ func valuesEqual(a, b core.Value) bool {
 		return false
 	}
 }
+
+func (e *Engine) Analyze(txn core.Txn, table string) error {
+	e.mu.Lock()
+	meta, err := e.catalog.GetTable(table)
+	e.mu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	stats := &core.TableStats{
+		Columns: make(map[string]core.ColumnStats),
+	}
+
+	iter, err := e.Scan(txn, table)
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	distinctSets := make(map[string]map[string]struct{})
+	for _, col := range meta.Schema.Columns {
+		distinctSets[col.Name] = make(map[string]struct{})
+	}
+
+	for {
+		_, row, ok, _ := iter.Next() // Fixed: added '_' for RowID
+		if !ok {
+			break
+		}
+		stats.RowCount++
+
+		for i, col := range meta.Schema.Columns {
+			val := row.Values[i]
+			colStats := stats.Columns[col.Name]
+
+			if val.Null {
+				colStats.NullCount++
+			} else {
+				// Track distinct count
+				distinctSets[col.Name][val.String()] = struct{}{}
+
+				// Track Min/Max
+				// We must handle the error returned by Compare
+				resMin, errMin := val.Compare(colStats.Min)
+				if colStats.Min.Null || (errMin == nil && resMin == -1) {
+					colStats.Min = val
+				}
+
+				resMax, errMax := val.Compare(colStats.Max)
+				if colStats.Max.Null || (errMax == nil && resMax == 1) {
+					colStats.Max = val
+				}
+			}
+			stats.Columns[col.Name] = colStats
+		}
+	}
+
+	for name, set := range distinctSets {
+		c := stats.Columns[name]
+		c.DistinctCount = int64(len(set))
+		stats.Columns[name] = c
+	}
+
+	e.mu.Lock()
+	meta.Stats = stats
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *Engine) Stats(table string) (core.TableStats, bool) { // Fixed: added '*'
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	meta, err := e.catalog.GetTable(table)
+	if err != nil || meta.Stats == nil {
+		return core.TableStats{}, false
+	}
+	return *meta.Stats, true
+}
