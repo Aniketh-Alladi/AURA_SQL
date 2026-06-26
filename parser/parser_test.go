@@ -303,15 +303,15 @@ func TestParseSelectWithJoinSuccess(t *testing.T) {
 		}
 
 		// Verify Join structure
-		if sel.Join == nil {
+		if len(sel.Joins) == 0 {
 			t.Fatalf("Expected Join field to be populated")
 		}
-		if sel.Join.Table != "orders" {
-			t.Errorf("Expected Join table 'orders', got %q", sel.Join.Table)
+		if sel.Joins[0].Table != "orders" {
+			t.Errorf("Expected Join table 'orders', got %q", sel.Joins[0].Table)
 		}
 
 		// Verify ON condition contains binary expression mapping
-		bin, ok := sel.Join.On.(*core.BinaryExpr)
+		bin, ok := sel.Joins[0].On.(*core.BinaryExpr)
 		if !ok || bin.Op != core.OpEq {
 			t.Errorf("Expected Equality operator in ON clause")
 		}
@@ -485,5 +485,104 @@ func TestTransactionIncompleteStatements(t *testing.T) {
 				t.Error("Expected non-nil statement")
 			}
 		})
+	}
+}
+
+func TestParseMultiJoinWithAliasesSuccess(t *testing.T) {
+	sql := `SELECT u.name, o.item, p.price 
+	        FROM users u 
+	        JOIN orders o ON u.id = o.uid 
+	        JOIN products p ON o.pid = p.id`
+
+	stmt, err := Parse(sql)
+	if err != nil {
+		t.Fatalf("Parse failed unexpectedly: %v", err)
+	}
+
+	selectStmt, ok := stmt.(*core.SelectStmt)
+	if !ok {
+		t.Fatalf("Expected *core.SelectStmt, got %T", stmt)
+	}
+
+	// Validate Base Table and its Alias
+	if selectStmt.From != "users" {
+		t.Errorf("Expected base table 'users', got %q", selectStmt.From)
+	}
+	if selectStmt.FromAlias != "u" {
+		t.Errorf("Expected base table alias 'u', got %q", selectStmt.FromAlias)
+	}
+
+	// Validate Chained Joins Length
+	if len(selectStmt.Joins) != 2 {
+		t.Fatalf("Expected exactly 2 join clauses, got %d", len(selectStmt.Joins))
+	}
+
+	// Verify First Join details
+	if selectStmt.Joins[0].Table != "orders" {
+		t.Errorf("Expected first join table to be 'orders', got %q", selectStmt.Joins[0].Table)
+	}
+
+	// Verify Second Join details
+	if selectStmt.Joins[1].Table != "products" {
+		t.Errorf("Expected second join table to be 'products', got %q", selectStmt.Joins[1].Table)
+	}
+}
+
+func TestParseExplainSuccess(t *testing.T) {
+	sql := "EXPLAIN SELECT name FROM users WHERE id = 1"
+	stmt, err := Parse(sql)
+	if err != nil {
+		t.Fatalf("Parse failed unexpectedly: %v", err)
+	}
+
+	explainStmt, ok := stmt.(*core.ExplainStmt)
+	if !ok {
+		t.Fatalf("Expected *core.ExplainStmt, got %T", stmt)
+	}
+
+	// Verify it contains a nested Select Statement
+	selectStmt, ok := explainStmt.Stmt.(*core.SelectStmt)
+	if !ok {
+		t.Fatalf("Expected wrapped statement to be *core.SelectStmt, got %T", explainStmt.Stmt)
+	}
+
+	if selectStmt.From != "users" {
+		t.Errorf("Expected nested select table to be 'users', got %q", selectStmt.From)
+	}
+}
+
+func TestParseAnalyzeSuccess(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"Direct table name", "ANALYZE users"},
+		{"With optional TABLE keyword", "ANALYZE TABLE users"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmt, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse failed unexpectedly: %v", err)
+			}
+
+			analyzeStmt, ok := stmt.(*core.AnalyzeStmt)
+			if !ok {
+				t.Fatalf("Expected *core.AnalyzeStmt, got %T", stmt)
+			}
+
+			if analyzeStmt.Table != "users" {
+				t.Errorf("Expected table 'users', got %q", analyzeStmt.Table)
+			}
+		})
+	}
+}
+
+func TestParseAnalyzeErrors(t *testing.T) {
+	sql := "ANALYZE" // Missing table identifier
+	_, err := Parse(sql)
+	if err == nil {
+		t.Error("Expected error for missing table identifier in ANALYZE, got nil")
 	}
 }

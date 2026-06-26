@@ -40,6 +40,7 @@ type Engine struct {
 	nextTx     uint64
 	pending    map[uint64]map[string][]pendingChange // txnID -> table -> changes
 	activeTxns map[uint64]bool                       // tracks active (uncommitted) transactions
+	statsCache map[string]core.TableStats            // cached statistics for tables
 }
 
 // New returns an empty in-memory engine.
@@ -49,6 +50,7 @@ func New() *Engine {
 		indexes:    make(map[string]bool),
 		pending:    make(map[uint64]map[string][]pendingChange),
 		activeTxns: make(map[uint64]bool),
+		statsCache: make(map[string]core.TableStats),
 	}
 }
 
@@ -89,10 +91,7 @@ func (t *txn) Commit() error {
 func (t *txn) Rollback() error {
 	t.e.mu.Lock()
 	defer t.e.mu.Unlock()
-	// Release any rows this transaction had claimed via pending changes, so a
-	// later transaction doesn't see a stale owner. (The activeTxns guard in the
-	// conflict check already tolerates stale entries, but clearing them keeps
-	// rowTxns honest.)
+	// Release any rows this transaction had claimed via pending changes
 	if pending, ok := t.e.pending[t.id]; ok {
 		for tableName, changes := range pending {
 			if tbl, exists := t.e.tables[tableName]; exists {
@@ -180,7 +179,6 @@ func (e *Engine) Insert(txn core.Txn, name string, row core.Row) (core.RowID, er
 	e.nextID++
 	id := e.nextID
 
-	// Store as pending change if in a transaction
 	if txn != nil {
 		txnID := txn.ID()
 		if _, exists := e.pending[txnID]; !exists {
@@ -194,7 +192,6 @@ func (e *Engine) Insert(txn core.Txn, name string, row core.Row) (core.RowID, er
 		return id, nil
 	}
 
-	// Autocommit: apply immediately
 	t.rows[id] = row
 	t.rowTxns[id] = 0
 	return id, nil
@@ -209,23 +206,17 @@ func (e *Engine) Update(txn core.Txn, name string, id core.RowID, row core.Row) 
 		return fmt.Errorf("table %q does not exist", name)
 	}
 
-	// Check if row exists
 	if _, exists := t.rows[id]; !exists {
 		return fmt.Errorf("row %d not found in %q", id, name)
 	}
 
-	// Check for write conflict
 	if txn != nil {
 		txnID := txn.ID()
 		if existingTxnID, exists := t.rowTxns[id]; exists && existingTxnID != 0 {
-			// Row is claimed by some transaction.
 			if existingTxnID != txnID {
-				// Claimed by a *different* transaction — conflict only if that
-				// transaction is still active (uncommitted).
 				if _, active := e.activeTxns[existingTxnID]; active {
 					return core.ErrWriteConflict
 				}
-				// Otherwise the previous owner is done; safe to take the row.
 			}
 		}
 	}
@@ -235,7 +226,6 @@ func (e *Engine) Update(txn core.Txn, name string, id core.RowID, row core.Row) 
 			len(row.Values), len(t.schema.Columns))
 	}
 
-	// Store as pending change if in a transaction
 	if txn != nil {
 		txnID := txn.ID()
 		if _, exists := e.pending[txnID]; !exists {
@@ -246,13 +236,10 @@ func (e *Engine) Update(txn core.Txn, name string, id core.RowID, row core.Row) 
 			row:      row,
 			isDelete: false,
 		})
-		// Claim the row for this transaction so a concurrent writer sees the
-		// conflict. Committed rows are reset to 0 in Commit.
 		t.rowTxns[id] = txnID
 		return nil
 	}
 
-	// Autocommit: apply immediately
 	t.rows[id] = row
 	t.rowTxns[id] = 0
 	return nil
@@ -267,28 +254,21 @@ func (e *Engine) Delete(txn core.Txn, name string, id core.RowID) error {
 		return fmt.Errorf("table %q does not exist", name)
 	}
 
-	// Check if row exists
 	if _, exists := t.rows[id]; !exists {
 		return fmt.Errorf("row %d not found in %q", id, name)
 	}
 
-	// Check for write conflict
 	if txn != nil {
 		txnID := txn.ID()
 		if existingTxnID, exists := t.rowTxns[id]; exists && existingTxnID != 0 {
-			// Row is claimed by some transaction.
 			if existingTxnID != txnID {
-				// Claimed by a *different* transaction — conflict only if that
-				// transaction is still active (uncommitted).
 				if _, active := e.activeTxns[existingTxnID]; active {
 					return core.ErrWriteConflict
 				}
-				// Otherwise the previous owner is done; safe to take the row.
 			}
 		}
 	}
 
-	// Store as pending change if in a transaction
 	if txn != nil {
 		txnID := txn.ID()
 		if _, exists := e.pending[txnID]; !exists {
@@ -299,13 +279,10 @@ func (e *Engine) Delete(txn core.Txn, name string, id core.RowID) error {
 			row:      core.Row{},
 			isDelete: true,
 		})
-		// Claim the row for this transaction so a concurrent writer sees the
-		// conflict. The row's rowTxns entry is removed in Commit.
 		t.rowTxns[id] = txnID
 		return nil
 	}
 
-	// Autocommit: apply immediately
 	delete(t.rows, id)
 	delete(t.rowTxns, id)
 	return nil
@@ -335,14 +312,10 @@ func (e *Engine) Scan(txn core.Txn, name string) (core.RowIterator, error) {
 	if !ok {
 		return nil, fmt.Errorf("table %q does not exist", name)
 	}
-	// Snapshot committed rows under the lock so the iterator is stable.
 	rowsCopy := make(map[core.RowID]core.Row, len(t.rows))
 	for id, r := range t.rows {
 		rowsCopy[id] = r
 	}
-	// Overlay this transaction's own uncommitted changes so it can read its own
-	// writes (insert/update/delete) before commit. Other transactions' pending
-	// changes are intentionally NOT visible — that's the isolation boundary.
 	if txn != nil {
 		if pend, ok := e.pending[txn.ID()]; ok {
 			for _, change := range pend[name] {
@@ -430,12 +403,197 @@ func (it *memstoreIndexIterator) Close() error {
 	return it.base.Close()
 }
 
+// ============================================================
+// Phase 6: Statistics Support
+// ============================================================
+
+// Analyze computes and caches statistics for a table.
 func (e *Engine) Analyze(txn core.Txn, table string) error {
-	// No-op for memstore, or implement basic counting if you have time
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	t, ok := e.tables[table]
+	if !ok {
+		return fmt.Errorf("table %q does not exist", table)
+	}
+
+	colStats := make(map[string]core.ColumnStats)
+	schema := t.schema
+
+	// Initialize stats for each column
+	for _, col := range schema.Columns {
+		colStats[col.Name] = core.ColumnStats{
+			DistinctCount: 0,
+			NullCount:     0,
+			Min:           core.NullValue(col.Type),
+			Max:           core.NullValue(col.Type),
+		}
+	}
+
+	if len(t.rows) == 0 {
+		e.statsCache[table] = core.TableStats{
+			RowCount: 0,
+			Columns:  colStats,
+		}
+		return nil
+	}
+
+	colValues := make(map[string][]core.Value)
+	for _, col := range schema.Columns {
+		colValues[col.Name] = make([]core.Value, 0, len(t.rows))
+	}
+
+	for _, row := range t.rows {
+		for i, col := range schema.Columns {
+			val := row.Values[i]
+			colValues[col.Name] = append(colValues[col.Name], val)
+		}
+	}
+
+	for _, col := range schema.Columns {
+		values := colValues[col.Name]
+		stats := core.ColumnStats{
+			DistinctCount: 0,
+			NullCount:     0,
+			Min:           core.NullValue(col.Type),
+			Max:           core.NullValue(col.Type),
+		}
+
+		distinct := make(map[string]bool)
+		hasNonNull := false
+
+		for _, val := range values {
+			if val.Null {
+				stats.NullCount++
+				continue
+			}
+			hasNonNull = true
+			key := val.String()
+			distinct[key] = true
+
+			if stats.Min.Null {
+				stats.Min = val
+			} else if cmp, err := val.Compare(stats.Min); err == nil && cmp < 0 {
+				stats.Min = val
+			}
+
+			if stats.Max.Null {
+				stats.Max = val
+			} else if cmp, err := val.Compare(stats.Max); err == nil && cmp > 0 {
+				stats.Max = val
+			}
+		}
+
+		if hasNonNull {
+			stats.DistinctCount = int64(len(distinct))
+		}
+
+		colStats[col.Name] = stats
+	}
+
+	e.statsCache[table] = core.TableStats{
+		RowCount: int64(len(t.rows)),
+		Columns:  colStats,
+	}
+
 	return nil
 }
 
+// Stats returns cached statistics for a table.
 func (e *Engine) Stats(table string) (core.TableStats, bool) {
-	// Return empty stats, false to indicate no stats available yet
-	return core.TableStats{}, false
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Check cache first
+	if stats, ok := e.statsCache[table]; ok {
+		return stats, true
+	}
+
+	// If not cached, compute on the fly
+	t, ok := e.tables[table]
+	if !ok {
+		return core.TableStats{}, false
+	}
+
+	colStats := make(map[string]core.ColumnStats)
+	schema := t.schema
+
+	for _, col := range schema.Columns {
+		colStats[col.Name] = core.ColumnStats{
+			DistinctCount: 0,
+			NullCount:     0,
+			Min:           core.NullValue(col.Type),
+			Max:           core.NullValue(col.Type),
+		}
+	}
+
+	if len(t.rows) == 0 {
+		stats := core.TableStats{
+			RowCount: 0,
+			Columns:  colStats,
+		}
+		e.statsCache[table] = stats
+		return stats, true
+	}
+
+	colValues := make(map[string][]core.Value)
+	for _, col := range schema.Columns {
+		colValues[col.Name] = make([]core.Value, 0, len(t.rows))
+	}
+
+	for _, row := range t.rows {
+		for i, col := range schema.Columns {
+			val := row.Values[i]
+			colValues[col.Name] = append(colValues[col.Name], val)
+		}
+	}
+
+	for _, col := range schema.Columns {
+		values := colValues[col.Name]
+		stats := core.ColumnStats{
+			DistinctCount: 0,
+			NullCount:     0,
+			Min:           core.NullValue(col.Type),
+			Max:           core.NullValue(col.Type),
+		}
+
+		distinct := make(map[string]bool)
+		hasNonNull := false
+
+		for _, val := range values {
+			if val.Null {
+				stats.NullCount++
+				continue
+			}
+			hasNonNull = true
+			key := val.String()
+			distinct[key] = true
+
+			if stats.Min.Null {
+				stats.Min = val
+			} else if cmp, err := val.Compare(stats.Min); err == nil && cmp < 0 {
+				stats.Min = val
+			}
+
+			if stats.Max.Null {
+				stats.Max = val
+			} else if cmp, err := val.Compare(stats.Max); err == nil && cmp > 0 {
+				stats.Max = val
+			}
+		}
+
+		if hasNonNull {
+			stats.DistinctCount = int64(len(distinct))
+		}
+
+		colStats[col.Name] = stats
+	}
+
+	tableStats := core.TableStats{
+		RowCount: int64(len(t.rows)),
+		Columns:  colStats,
+	}
+	e.statsCache[table] = tableStats
+
+	return tableStats, true
 }

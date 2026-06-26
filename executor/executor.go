@@ -130,12 +130,12 @@ func buildSelectPlan(eng core.StorageEngine, txn core.Txn, stmt *core.SelectStmt
 	}
 
 	// Add JOIN if present
-	if stmt.Join != nil {
-		join, err := buildJoinPlan(eng, txn, root, stmt.Join)
+	for _, join := range stmt.Joins {
+		joinOp, err := buildJoinPlan(eng, txn, root, &join)
 		if err != nil {
 			return nil, err
 		}
-		root = join
+		root = joinOp
 	}
 
 	// Add WHERE filter
